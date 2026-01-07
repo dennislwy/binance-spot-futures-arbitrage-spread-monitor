@@ -122,7 +122,7 @@ async def monitor_symbol(
                 if not conditions["positive_basis"]:
                     reasons.append("Negative basis")
                 if not conditions["basis_threshold"] and conditions["positive_basis"]:
-                    reasons.append(f"Basis too small - {ENTRY_THRESHOLD*100:.2f}% required")
+                    reasons.append("Basis too small")
                 if not conditions["funding_positive"]:
                     reasons.append("Negative funding")
 
