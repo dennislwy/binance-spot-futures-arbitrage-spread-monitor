@@ -72,6 +72,15 @@ async def monitor_symbol(
             logger.error(f"Error handling futures mark price: {e}", exc_info=True)
 
     def get_sleep_delay(start_time: float) -> float:
+        """
+        Calculate sleep delay to maintain 1 second intervals
+
+        Args:
+            start_time: Timestamp when the evaluation started
+
+        Returns:
+            Sleep delay in seconds
+        """
         state["last_eval_time"] = time.time()
         return max(1.0 - (state["last_eval_time"] - start_time), 0.0)
 
@@ -246,7 +255,7 @@ async def main(symbols: list[str], notifier: Telegram | None = None):
     logging.info(f"Monitoring symbols: {', '.join(symbols)}")
     if notifier:
         await notifier.text(
-            f"Starting Binance Spot-Futures Arbitrage Basis Monitor...\nMonitoring: {', '.join(symbols)}"
+            f"Starting Binance Spot-Futures Arbitrage Basis Monitor for {', '.join(symbols)}"
         )
 
     logging.info(
