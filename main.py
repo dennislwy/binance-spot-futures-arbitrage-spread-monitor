@@ -39,7 +39,10 @@ async def main(symbol: str = "BTCUSDT", notifier: Telegram | None = None):
     )
 
     client = await AsyncClient.create()
-    bsm = BinanceSocketManager(client)
+    # Increase queue size to handle high-frequency market data streams
+    # Default is 100, but we need more for busy markets like BTCUSDT
+    # Using 1000 provides adequate buffer for message bursts
+    bsm = BinanceSocketManager(client, max_queue_size=1000)
 
     async def handle_spot_trade(msg):
         """Handle spot trade stream updates - non-blocking"""
@@ -156,40 +159,70 @@ async def main(symbol: str = "BTCUSDT", notifier: Telegram | None = None):
             # Check every 0.5 seconds
             await asyncio.sleep(0.5)
 
-    # Start WebSocket streams
-    try:
-        # Use aggregated trade stream instead of raw trades to reduce message volume
-        # Aggregated trades update every 100ms, much less frequent than individual trades
-        spot_stream = bsm.aggtrade_socket(symbol)
-        # Futures mark price stream
-        futures_stream = bsm.symbol_mark_price_socket(symbol)
+    # Start WebSocket streams with automatic reconnection
+    max_retries = None  # Retry indefinitely
+    retry_count = 0
+    retry_delay = 5  # seconds between retries
 
-        # Create tasks for both streams
-        async with spot_stream as spot_ws, futures_stream as futures_ws:
-            logger.info("WebSocket streams connected. Monitoring for arbitrage signals...")
+    while max_retries is None or retry_count < max_retries:
+        try:
+            # Use aggregated trade stream instead of raw trades to reduce message volume
+            # Aggregated trades update every 100ms, much less frequent than individual trades
+            spot_stream = bsm.aggtrade_socket(symbol)
+            # Futures mark price stream
+            futures_stream = bsm.symbol_mark_price_socket(symbol)
 
-            # Process messages concurrently
-            spot_task = asyncio.create_task(
-                process_stream(spot_ws, handle_spot_trade, "Spot Aggregated Trade")
+            # Create tasks for both streams
+            async with spot_stream as spot_ws, futures_stream as futures_ws:
+                logger.info(
+                    f"WebSocket streams connected (attempt {retry_count + 1}). Monitoring for arbitrage signals..."
+                )
+                if retry_count > 0 and notifier:
+                    await notifier.text(f"WebSocket reconnected after {retry_count} attempts")
+
+                # Reset retry counter on successful connection
+                retry_count = 0
+
+                # Process messages concurrently
+                spot_task = asyncio.create_task(
+                    process_stream(spot_ws, handle_spot_trade, "Spot Aggregated Trade")
+                )
+                futures_task = asyncio.create_task(
+                    process_stream(futures_ws, handle_futures_mark_price, "Futures Mark Price")
+                )
+                # Start signal evaluation loop
+                eval_task = asyncio.create_task(evaluate_signal_loop())
+
+                # Wait for all tasks
+                await asyncio.gather(spot_task, futures_task, eval_task)
+
+        except KeyboardInterrupt:
+            logger.info("Shutting down gracefully...")
+            break
+        except Exception as e:
+            retry_count += 1
+            logger.error(
+                f"Error in main loop (attempt {retry_count}): {e}",
+                exc_info=True,
             )
-            futures_task = asyncio.create_task(
-                process_stream(futures_ws, handle_futures_mark_price, "Futures Mark Price")
-            )
-            # Start signal evaluation loop
-            eval_task = asyncio.create_task(evaluate_signal_loop())
 
-            # Wait for all tasks
-            await asyncio.gather(spot_task, futures_task, eval_task)
+            if notifier:
+                await notifier.text(
+                    f"WebSocket error detected. Reconnecting in {retry_delay}s... (attempt {retry_count})"
+                )
 
-    except KeyboardInterrupt:
-        logger.info("Shutting down gracefully...")
-    except Exception as e:
-        logger.error(f"Error in main loop: {e}", exc_info=True)
-    finally:
-        await client.close_connection()
-        if notifier:
-            await notifier.text("Binance Spot-Futures Arbitrage Monitor terminated")
-            await notifier.close()
+            # Wait before retrying
+            logger.info(f"Reconnecting in {retry_delay} seconds...")
+            await asyncio.sleep(retry_delay)
+
+            # Exponential backoff with max delay of 60 seconds
+            retry_delay = min(retry_delay * 1.5, 60)
+
+    # Cleanup
+    await client.close_connection()
+    if notifier:
+        await notifier.text("Binance Spot-Futures Arbitrage Monitor terminated")
+        await notifier.close()
 
 
 async def process_stream(stream, handler, stream_name):

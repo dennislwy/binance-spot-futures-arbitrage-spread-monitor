@@ -777,7 +777,7 @@ wheels = [
 ]
 
 [[package]]
-name = "spot-future-arbitrage-basis-monitor"
+name = "spot-futures-arbitrage-basis-monitor"
 version = "0.1.0"
 source = { virtual = "." }
 dependencies = [
