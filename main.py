@@ -1,6 +1,7 @@
 import asyncio
 import logging
 import sys
+import time
 from logging.handlers import TimedRotatingFileHandler
 from pathlib import Path
 
@@ -12,14 +13,27 @@ from notifications import Telegram
 logger = logging.getLogger(__name__)
 
 
-async def main(symbol: str = "BTCUSDT", notifier: Telegram | None = None):
-    # Configuration parameters
-    MIN_BASIS = 0.0024  # 0.24%
-    SAFETY_MARGIN = 0.0004  # 0.04%
-    MIN_FUNDING_RATE = 0.0  # funding must be positive
-    ENTRY_THRESHOLD = MIN_BASIS + SAFETY_MARGIN  # 0.28%
+async def monitor_symbol(
+    symbol: str,
+    bsm: BinanceSocketManager,
+    notifier: Telegram | None = None,
+    min_basis: float = 0.0024,
+    safety_margin: float = 0.0004,
+    min_funding_rate: float = 0.0,
+):
+    """Monitor a single symbol for arbitrage opportunities.
 
-    # Shared state for latest prices and funding rate
+    Args:
+        symbol: Trading pair symbol (e.g., "BTCUSDT")
+        bsm: BinanceSocketManager instance
+        notifier: Optional Telegram notifier
+        min_basis: Minimum basis threshold (default: 0.24%)
+        safety_margin: Additional safety buffer (default: 0.04%)
+        min_funding_rate: Minimum funding rate (default: 0.0)
+    """
+    ENTRY_THRESHOLD = min_basis + safety_margin
+
+    # Shared state for latest prices and funding rate (per symbol)
     state = {
         "spot_price": None,
         "futures_price": None,
@@ -28,21 +42,8 @@ async def main(symbol: str = "BTCUSDT", notifier: Telegram | None = None):
         "last_basis": None,  # Track last basis (3 decimal accuracy)
         "last_funding": None,  # Track last funding rate (4 decimal accuracy)
         "last_all_conditions_met": False,  # Track if all conditions were met
+        "last_eval_time": 0.0,  # Timestamp of last evaluation
     }
-
-    logging.info("Starting Binance Spot-Futures Arbitrage Basis Monitor...")
-    if notifier:
-        await notifier.text("Starting Binance Spot-Futures Arbitrage Basis Monitor...")
-
-    logging.info(
-        f"Configuration: MIN_BASIS={MIN_BASIS*100:.2f}%, SAFETY_MARGIN={SAFETY_MARGIN*100:.2f}%, ENTRY_THRESHOLD={ENTRY_THRESHOLD*100:.2f}%"
-    )
-
-    client = await AsyncClient.create()
-    # Increase queue size to handle high-frequency market data streams
-    # Default is 100, but we need more for busy markets like BTCUSDT
-    # Using 1000 provides adequate buffer for message bursts
-    bsm = BinanceSocketManager(client, max_queue_size=1000)
 
     async def handle_spot_trade(msg):
         """Handle spot trade stream updates - non-blocking"""
@@ -70,30 +71,35 @@ async def main(symbol: str = "BTCUSDT", notifier: Telegram | None = None):
         except Exception as e:
             logger.error(f"Error handling futures mark price: {e}", exc_info=True)
 
+    def get_sleep_delay(start_time: float) -> float:
+        state["last_eval_time"] = time.time()
+        return max(1.0 - (state["last_eval_time"] - start_time), 0.0)
+
     async def evaluate_signal_loop():
         """Periodically evaluate and log arbitrage signals"""
         while True:
             try:
+                start_time = time.time()
                 spot = state["spot_price"]
                 futures = state["futures_price"]
                 funding = state["funding_rate"]
 
                 # Wait until we have all data
                 if spot is None or futures is None or funding is None:
-                    await asyncio.sleep(0.5)
+                    await asyncio.sleep(get_sleep_delay(start_time))
                     continue
 
                 # Calculate basis
                 basis = calculate_basis(spot, futures)
                 if basis is None:
-                    await asyncio.sleep(0.5)
+                    await asyncio.sleep(get_sleep_delay(start_time))
                     continue
 
                 # Evaluate conditions
                 conditions = {
                     "positive_basis": futures > spot,
                     "basis_threshold": basis >= ENTRY_THRESHOLD,
-                    "funding_positive": funding > MIN_FUNDING_RATE,
+                    "funding_positive": funding > min_funding_rate,
                 }
 
                 # Determine signal
@@ -106,7 +112,7 @@ async def main(symbol: str = "BTCUSDT", notifier: Telegram | None = None):
                 reasons = []
                 if not conditions["positive_basis"]:
                     reasons.append("Negative basis")
-                if not conditions["basis_threshold"]:
+                if not conditions["basis_threshold"] and conditions["positive_basis"]:
                     reasons.append("Basis too small")
                 if not conditions["funding_positive"]:
                     reasons.append("Funding unfavorable")
@@ -123,15 +129,15 @@ async def main(symbol: str = "BTCUSDT", notifier: Telegram | None = None):
                 # Rate limiting: Only log if signal changed OR basis changed (3 decimals) OR funding changed (4 decimals)
                 should_log = (
                     current_signal != state["last_signal"]
-                    or basis_rounded != state["last_basis"]
                     or funding_rounded != state["last_funding"]
+                    # or basis_rounded != state["last_basis"]
                 )
 
                 if should_log:
                     # Log the signal
                     logger.info(
                         f"{symbol} | "
-                        f"Spot: {spot:,.2f} | Futures: {futures:,.2f} | "
+                        f"Spot: {spot:,.4f} | Futures: {futures:,.4f} | "
                         f"Basis: {basis*100:.3f}% | Funding: {funding*100:.4f}% | "
                         f"{signal_status}{reason_text}"
                     )
@@ -143,11 +149,12 @@ async def main(symbol: str = "BTCUSDT", notifier: Telegram | None = None):
                         await notifier.text(
                             f"Arbitrage Signal Detected:\n"
                             f"{symbol} | "
-                            f"Spot: {spot:,.2f} | Futures: {futures:,.2f} | "
+                            f"Spot: {spot:,.4f} | Futures: {futures:,.4f} | "
                             f"Basis: {basis*100:.3f}% | Funding: {funding*100:.4f}% | "
                             f"{signal_status}{reason_text}"
                         )
 
+                # Update last known states
                 state["last_signal"] = current_signal
                 state["last_basis"] = basis_rounded
                 state["last_funding"] = funding_rounded
@@ -156,13 +163,13 @@ async def main(symbol: str = "BTCUSDT", notifier: Telegram | None = None):
             except Exception as e:
                 logger.error(f"Error in evaluate_signal_loop: {e}", exc_info=True)
 
-            # Check every 0.5 seconds
-            await asyncio.sleep(0.5)
+            # Check every 1 second
+            await asyncio.sleep(get_sleep_delay(start_time))
 
     # Start WebSocket streams with automatic reconnection
     max_retries = None  # Retry indefinitely
     retry_count = 0
-    retry_delay = 5  # seconds between retries
+    retry_delay = 3  # seconds between retries
 
     while max_retries is None or retry_count < max_retries:
         try:
@@ -175,13 +182,14 @@ async def main(symbol: str = "BTCUSDT", notifier: Telegram | None = None):
             # Create tasks for both streams
             async with spot_stream as spot_ws, futures_stream as futures_ws:
                 logger.info(
-                    f"WebSocket streams connected (attempt {retry_count + 1}). Monitoring for arbitrage signals..."
+                    f"WebSocket streams connected (attempt {retry_count + 1}). Monitoring {symbol} for arbitrage signals..."
                 )
                 if retry_count > 0 and notifier:
                     await notifier.text(f"WebSocket reconnected after {retry_count} attempts")
 
                 # Reset retry counter on successful connection
                 retry_count = 0
+                retry_delay = 3  # reset delay
 
                 # Process messages concurrently
                 spot_task = asyncio.create_task(
@@ -216,13 +224,70 @@ async def main(symbol: str = "BTCUSDT", notifier: Telegram | None = None):
             await asyncio.sleep(retry_delay)
 
             # Exponential backoff with max delay of 60 seconds
-            retry_delay = min(retry_delay * 1.5, 60)
+            retry_delay = min(retry_delay * 1.5, 60.0)
 
-    # Cleanup
-    await client.close_connection()
+    logger.info(f"Monitor for {symbol} terminated")
+
+
+async def main(symbols: list[str], notifier: Telegram | None = None):
+    """Main entry point for monitoring multiple symbols concurrently.
+
+    Args:
+        symbols: List of trading pair symbols to monitor (e.g., ["BTCUSDT", "ETHUSDT"])
+        notifier: Optional Telegram notifier
+    """
+    # Configuration parameters
+    MIN_BASIS = 0.0024  # 0.24%
+    SAFETY_MARGIN = 0.0004  # 0.04%
+    MIN_FUNDING_RATE = 0.0  # funding must be positive
+    ENTRY_THRESHOLD = MIN_BASIS + SAFETY_MARGIN  # 0.28%
+
+    logging.info("Starting Binance Spot-Futures Arbitrage Basis Monitor...")
+    logging.info(f"Monitoring symbols: {', '.join(symbols)}")
     if notifier:
-        await notifier.text("Binance Spot-Futures Arbitrage Monitor terminated")
-        await notifier.close()
+        await notifier.text(
+            f"Starting Binance Spot-Futures Arbitrage Basis Monitor...\nMonitoring: {', '.join(symbols)}"
+        )
+
+    logging.info(
+        f"Configuration: MIN_BASIS={MIN_BASIS*100:.2f}%, SAFETY_MARGIN={SAFETY_MARGIN*100:.2f}%, ENTRY_THRESHOLD={ENTRY_THRESHOLD*100:.2f}%"
+    )
+
+    client = await AsyncClient.create()
+    # Increase queue size to handle high-frequency market data streams
+    # For multiple symbols, we need even more buffer capacity
+    # Using 2000 to handle multiple concurrent streams
+    bsm = BinanceSocketManager(client, max_queue_size=2000)
+
+    try:
+        # Create monitor tasks for all symbols
+        monitor_tasks = [
+            asyncio.create_task(
+                monitor_symbol(
+                    symbol=symbol,
+                    bsm=bsm,
+                    notifier=notifier,
+                    min_basis=MIN_BASIS,
+                    safety_margin=SAFETY_MARGIN,
+                    min_funding_rate=MIN_FUNDING_RATE,
+                )
+            )
+            for symbol in symbols
+        ]
+
+        # Run all monitors concurrently
+        await asyncio.gather(*monitor_tasks, return_exceptions=True)
+
+    except KeyboardInterrupt:
+        logging.info("Shutting down gracefully...")
+    except Exception as e:
+        logging.error(f"Error in main: {e}", exc_info=True)
+    finally:
+        # Cleanup
+        await client.close_connection()
+        if notifier:
+            await notifier.text("Binance Spot-Futures Arbitrage Monitor terminated")
+            await notifier.close()
 
 
 async def process_stream(stream, handler, stream_name):
@@ -293,7 +358,20 @@ def setup_logging() -> None:
 
 if __name__ == "__main__":
     setup_logging()
-    symbol = "BTCUSDT"
+
+    # List of symbols to monitor
+    symbols = [
+        "BTCUSDT",  # Tier 1 - Stability anchor
+        "ETHUSDT",  # Tier 1 - Second major
+        "BNBUSDT",  # Tier 2 - Binance native advantage
+        "SOLUSDT",  # Tier 2 - High volatility plays
+        "XRPUSDT",  # Tier 2 - Volume leader
+        "ADAUSDT",  # Tier 3 - Good liquidity
+        "DOGEUSDT",  # Tier 3 - Meme coin
+        "POLUSDT",  # Tier 3 - Good liquidity
+    ]
+
+    # symbols = ["BTCUSDT"]
 
     token = settings.TELEGRAM_BOT_TOKEN
     chat_id = settings.TELEGRAM_CHAT_ID
@@ -304,4 +382,4 @@ if __name__ == "__main__":
     else:
         logger.info("Telegram notifier NOT configured")
 
-    asyncio.run(main(symbol, notifier))
+    asyncio.run(main(symbols, notifier))
