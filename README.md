@@ -127,8 +127,58 @@ To set up Telegram notifications:
 ## Usage
 
 ### Run the Monitor
+
+#### Option 1: Direct Execution
 ```bash
 python main.py
+```
+
+#### Option 2: Run as Systemd Service (Linux)
+
+For production deployment, you can run the monitor as a systemd service that starts automatically on boot and restarts on failure.
+
+**Register the service:**
+```bash
+./service-register.sh
+```
+
+This creates and enables a systemd service with:
+- Automatic restart on failure (10-second delay)
+- Network dependency (waits for network connectivity)
+- Journal logging for easy log access
+- Runs as your current user
+
+**Manage the service:**
+```bash
+# Start the service
+./service-start.sh
+# or: sudo systemctl start spot-futures-arbitrage-basis-monitor
+
+# Stop the service
+./service-stop.sh
+# or: sudo systemctl stop spot-futures-arbitrage-basis-monitor
+
+# Restart the service
+./service-restart.sh
+# or: sudo systemctl restart spot-futures-arbitrage-basis-monitor
+
+# Check service status
+./service-status.sh
+# or: sudo systemctl status spot-futures-arbitrage-basis-monitor
+
+# View live logs
+sudo journalctl -u spot-futures-arbitrage-basis-monitor -f
+
+# View logs from last boot
+sudo journalctl -u spot-futures-arbitrage-basis-monitor -b
+```
+
+**Unregister the service:**
+```bash
+sudo systemctl stop spot-futures-arbitrage-basis-monitor
+sudo systemctl disable spot-futures-arbitrage-basis-monitor
+sudo rm /etc/systemd/system/spot-futures-arbitrage-basis-monitor.service
+sudo systemctl daemon-reload
 ```
 
 ### Example Output
@@ -222,6 +272,11 @@ spot-futures-arbitrage-basis-monitor/
 ├── .env                  # Environment variables (not in repo)
 ├── log/                  # Log files (auto-created)
 │   └── app.log          # Main application log (rotates daily)
+├── service-register.sh   # Register as systemd service
+├── service-start.sh      # Start the systemd service
+├── service-stop.sh       # Stop the systemd service
+├── service-restart.sh    # Restart the systemd service
+├── service-status.sh     # Check service status
 ├── CLAUDE.md            # Development documentation
 └── README.md            # This file
 ```
@@ -266,6 +321,25 @@ spot-futures-arbitrage-basis-monitor/
 1. Check write permissions for `log/` directory
 2. Application auto-creates directory on startup
 3. Verify logging is configured in `main.py`
+
+### Systemd Service Issues
+
+**Symptom**: Service fails to start or keeps restarting
+
+**Solutions:**
+1. Check service status: `sudo systemctl status spot-futures-arbitrage-basis-monitor`
+2. View detailed logs: `sudo journalctl -u spot-futures-arbitrage-basis-monitor -n 100`
+3. Verify uv is installed at `~/.local/bin/uv`
+4. Check `.env` file exists and has correct permissions
+5. Ensure working directory path is correct in service file
+6. Verify Python dependencies are installed: `uv sync`
+
+**Symptom**: Service logs not appearing in journal
+
+**Solutions:**
+1. Check StandardOutput/StandardError are set to `journal` in service file
+2. Logs also written to `log/app.log` as backup
+3. Use `sudo journalctl -u spot-futures-arbitrage-basis-monitor --no-pager` to see all logs
 
 ## Limitations & Future Enhancements
 
