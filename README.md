@@ -139,7 +139,7 @@ For production deployment, you can run the monitor as a systemd service that sta
 
 **Register the service:**
 ```bash
-./service-register.sh
+./service.sh register
 ```
 
 This creates and enables a systemd service with:
@@ -151,20 +151,16 @@ This creates and enables a systemd service with:
 **Manage the service:**
 ```bash
 # Start the service
-./service-start.sh
-# or: sudo systemctl start spot-futures-arbitrage-basis-monitor
+./service.sh start
 
 # Stop the service
-./service-stop.sh
-# or: sudo systemctl stop spot-futures-arbitrage-basis-monitor
+./service.sh stop
 
 # Restart the service
-./service-restart.sh
-# or: sudo systemctl restart spot-futures-arbitrage-basis-monitor
+./service.sh restart
 
 # Check service status
-./service-status.sh
-# or: sudo systemctl status spot-futures-arbitrage-basis-monitor
+./service.sh status
 
 # View live logs
 sudo journalctl -u spot-futures-arbitrage-basis-monitor -f
@@ -175,10 +171,7 @@ sudo journalctl -u spot-futures-arbitrage-basis-monitor -b
 
 **Unregister the service:**
 ```bash
-sudo systemctl stop spot-futures-arbitrage-basis-monitor
-sudo systemctl disable spot-futures-arbitrage-basis-monitor
-sudo rm /etc/systemd/system/spot-futures-arbitrage-basis-monitor.service
-sudo systemctl daemon-reload
+./service.sh unregister
 ```
 
 ### Example Output
@@ -272,11 +265,7 @@ spot-futures-arbitrage-basis-monitor/
 ├── .env                  # Environment variables (not in repo)
 ├── log/                  # Log files (auto-created)
 │   └── app.log          # Main application log (rotates daily)
-├── service-register.sh   # Register as systemd service
-├── service-start.sh      # Start the systemd service
-├── service-stop.sh       # Stop the systemd service
-├── service-restart.sh    # Restart the systemd service
-├── service-status.sh     # Check service status
+├── service.sh            # Systemd service management script
 ├── CLAUDE.md            # Development documentation
 └── README.md            # This file
 ```

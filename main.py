@@ -184,9 +184,12 @@ async def monitor_symbol(
         try:
             # Use aggregated trade stream instead of raw trades to reduce message volume
             # Aggregated trades update every 100ms, much less frequent than individual trades
-            spot_stream = bsm.aggtrade_socket(symbol)
+            spot_stream = bsm.aggtrade_socket(symbol)  # real-time (lower traffic)
+            # spot_stream = bsm.trade_socket(symbol)  # real-time (higher traffic)
+
             # Futures mark price stream
-            futures_stream = bsm.symbol_mark_price_socket(symbol)
+            futures_stream = bsm.symbol_mark_price_socket(symbol)  # 1s updates
+            # futures_stream = bsm.aggtrade_futures_socket(symbol)  # 100ms updates
 
             # Create tasks for both streams
             async with spot_stream as spot_ws, futures_stream as futures_ws:
