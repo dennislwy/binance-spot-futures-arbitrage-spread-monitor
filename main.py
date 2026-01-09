@@ -36,7 +36,9 @@ async def monitor_symbol(
     # Shared state for latest prices and funding rate (per symbol)
     state = {
         "spot_price": None,
+        "spot_time": None,
         "futures_price": None,
+        "futures_time": None,
         "funding_rate": None,
         "last_signal": None,  # Track last signal to avoid duplicate logs
         "last_basis": None,  # Track last basis (3 decimal accuracy)
@@ -52,6 +54,9 @@ async def monitor_symbol(
             data = msg.get("data", msg)
             # Get spot price from trade stream (just update state, don't log)
             state["spot_price"] = float(data["p"])
+            state["spot_time"] = int(data["E"])
+            # logger.info(f"Spot trade update: price={state['spot_price']}, time={state['spot_time']}")
+            
         except KeyError as e:
             logger.error(f"Spot trade message missing key {e}: {msg}")
         except Exception as e:
@@ -64,6 +69,9 @@ async def monitor_symbol(
             data = msg.get("data", msg)
             # Get futures mark price
             state["futures_price"] = float(data["p"])
+            state["futures_time"] = int(data["E"])
+            # logger.info(f"Futures mark price update: price={state['futures_price']}, time={state['futures_time']}")
+            
             # Get funding rate from mark price stream
             state["funding_rate"] = float(data["r"])
         except KeyError as e:
@@ -71,38 +79,54 @@ async def monitor_symbol(
         except Exception as e:
             logger.error(f"Error handling futures mark price: {e}", exc_info=True)
 
-    def get_sleep_delay(start_time: float) -> float:
+    def get_sleep_delay(start_time: float, target_interval: float = 1.0) -> float:
         """
         Calculate sleep delay to maintain 1 second intervals
 
         Args:
             start_time: Timestamp when the evaluation started
+            target_interval: Desired interval between evaluations (default: 1.0 second)
 
         Returns:
             Sleep delay in seconds
         """
         state["last_eval_time"] = time.time()
-        return max(1.0 - (state["last_eval_time"] - start_time), 0.0)
+        return max(target_interval - (state["last_eval_time"] - start_time), 0.0)
+
+    def to_humanize_time(epoch_ms: int) -> str:
+        """Convert epoch milliseconds to human-readable time string (up to milliseconds)"""
+        return time.strftime(
+            "%Y-%m-%d %H:%M:%S", time.localtime(epoch_ms / 1000)
+        ) + f".{epoch_ms % 1000:03d}"
 
     async def evaluate_signal_loop():
         """Periodically evaluate and log arbitrage signals"""
         while True:
+            start_time = time.time()
+                
             try:
-                start_time = time.time()
                 spot = state["spot_price"]
+                spot_time = state["spot_time"]
                 futures = state["futures_price"]
+                futures_time = state["futures_time"]
                 funding = state["funding_rate"]
 
                 # Wait until we have all data
-                if spot is None or futures is None or funding is None:
+                if (spot is None or futures is None or funding is None or spot_time is None or futures_time is None):
+                    # logger.warning(f"[{symbol}] Waiting for complete data: spot={spot}, futures={futures}, funding={funding}")
                     await asyncio.sleep(get_sleep_delay(start_time))
                     continue
+                
+                # # make sure trade time is the same second
+                # if (spot_time // 1000) != (futures_time // 1000):
+                #     logger.info(f"[{symbol}] Skipping evaluation, mismatched trade times: spot_time={spot_time}, futures_time={futures_time}")
+                #     await asyncio.sleep(get_sleep_delay(start_time))
+                #     continue
+                # else:
+                #     logger.info(f"[{symbol}] Trade times matched: spot_time={spot_time}, futures_time={futures_time}")
 
                 # Calculate basis
                 basis = calculate_basis(spot, futures)
-                if basis is None:
-                    await asyncio.sleep(get_sleep_delay(start_time))
-                    continue
 
                 # Evaluate conditions
                 conditions = {
@@ -152,11 +176,12 @@ async def monitor_symbol(
                     )
 
                 if notifier:
-                    should_notify = all_conditions_met != state["last_all_conditions_met"]
+                    should_notify = all_conditions_met or all_conditions_met != state["last_all_conditions_met"]
 
                     if should_notify:
                         await notifier.text(
                             f"Arbitrage Signal Detected:\n"
+                            f"{to_humanize_time(spot_time)} | "
                             f"{symbol} | "
                             f"Spot: {spot:,.4f} | Futures: {futures:,.4f} | "
                             f"Basis: {basis*100:.3f}% | Funding: {funding*100:.4f}% | "
@@ -172,7 +197,7 @@ async def monitor_symbol(
             except Exception as e:
                 logger.error(f"Error in evaluate_signal_loop: {e}", exc_info=True)
 
-            # Check every 1 second
+            # Maintain approximately 1 second intervals
             await asyncio.sleep(get_sleep_delay(start_time))
 
     # Start WebSocket streams with automatic reconnection
@@ -184,8 +209,8 @@ async def monitor_symbol(
         try:
             # Use aggregated trade stream instead of raw trades to reduce message volume
             # Aggregated trades update every 100ms, much less frequent than individual trades
-            spot_stream = bsm.aggtrade_socket(symbol)  # real-time (lower traffic)
-            # spot_stream = bsm.trade_socket(symbol)  # real-time (higher traffic)
+            # spot_stream = bsm.aggtrade_socket(symbol)  # real-time (lower traffic)
+            spot_stream = bsm.trade_socket(symbol)  # real-time (higher traffic)
 
             # Futures mark price stream
             futures_stream = bsm.symbol_mark_price_socket(symbol)  # 1s updates
@@ -323,7 +348,7 @@ async def process_stream(stream, handler, stream_name):
         raise
 
 
-def calculate_basis(spot_price, futures_price):
+def calculate_basis(spot_price: float, futures_price: float) -> float | None:
     if spot_price and futures_price:
         return (futures_price - spot_price) / spot_price
     return None
@@ -383,7 +408,7 @@ if __name__ == "__main__":
         "POLUSDT",  # Tier 3 - Good liquidity
     ]
 
-    # symbols = ["BTCUSDT"]
+    # symbols = ["DOGEUSDT"]
 
     token = settings.TELEGRAM_BOT_TOKEN
     chat_id = settings.TELEGRAM_CHAT_ID
