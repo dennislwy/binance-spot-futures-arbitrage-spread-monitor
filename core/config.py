@@ -16,6 +16,29 @@ class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", case_sensitive=False)
 
     # Application Configuration
+    DEBUG: bool = Field(default=True, description="Debug mode flag")
+
+    SYMBOLS: str = Field(
+        default="BTCUSDT,ETHUSDT",
+        description="Comma-separated list of trading symbols",
+    )
+    
+    MIN_BASIS: float = Field(
+        default=0.0024,
+        description="Minimum basis threshold to trigger notifications (e.g., 0.0024 for 0.24%)",
+    )
+    
+    SAFETY_MARGIN: float = Field(
+        default=0.0004,
+        description="Safety margin to subtract from basis (e.g., 0.0004 for 0.04%)",
+    )
+    
+    MIN_FUNDING_RATE: float = Field(
+        default=0.0,
+        description="Minimum funding rate threshold (e.g., 0.0 for positive funding)",
+    )
+    
+    # Notification settings
     TELEGRAM_BOT_TOKEN: str = Field(
         default="",
         description="Telegram bot token for sending notifications",

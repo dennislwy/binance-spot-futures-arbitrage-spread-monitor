@@ -7,7 +7,7 @@ from pathlib import Path
 
 from binance import AsyncClient, BinanceSocketManager
 
-from config import settings
+from core.config import settings
 from notifications import Telegram
 
 logger = logging.getLogger(__name__)
@@ -48,29 +48,87 @@ async def monitor_symbol(
     }
 
     async def handle_spot_trade(msg):
-        """Handle spot trade stream updates - non-blocking"""
+        """
+        Handle spot trade stream updates
+        
+        {
+            "e": "trade",       // Event type
+            "E": 1672515782136, // Event time
+            "s": "BNBBTC",      // Symbol
+            "t": 12345,         // Trade ID
+            "p": "0.001",       // Price
+            "q": "100",         // Quantity
+            "T": 1672515782136, // Trade time
+            "m": true,          // Is the buyer the market maker?
+            "M": true           // Ignore
+        }        
+        """
         try:
             # Extract data from nested structure
             data = msg.get("data", msg)
             # Get spot price from trade stream (just update state, don't log)
             state["spot_price"] = float(data["p"])
             state["spot_time"] = int(data["E"])
-            # logger.info(f"Spot trade update: price={state['spot_price']}, time={state['spot_time']}")
+            logger.debug(f"Spot trade update: price={state['spot_price']}, time={state['spot_time']}, trade id={data['t']}")
             
         except KeyError as e:
             logger.error(f"Spot trade message missing key {e}: {msg}")
         except Exception as e:
             logger.error(f"Error handling spot trade: {e}", exc_info=True)
 
+    async def handle_futures_aggtrade(msg):
+        """
+        Handle futures aggregate trade stream updates
+        
+        {
+            "e": "aggTrade",  // Event type
+            "E": 123456789,   // Event time
+            "s": "BTCUSDT",   // Symbol
+            "a": 5933014,     // Aggregate trade ID
+            "p": "0.001",     // Price
+            "q": "100",       // Quantity with all the market trades
+            "nq": "100",      // Normal quantity without the trades involving RPI orders
+            "f": 100,         // First trade ID
+            "l": 105,         // Last trade ID
+            "T": 123456785,   // Trade time
+            "m": true,        // Is the buyer the market maker?
+        }
+        """
+        try:
+            # Extract data from nested structure
+            data = msg.get("data", msg)
+            # Get futures aggregate trade
+            state["futures_price"] = float(data["p"])
+            state["futures_time"] = int(data["E"])
+            logger.debug(f"Futures aggregate trade update: price={state['futures_price']}, time={state['futures_time']}, trade id={data['a']}")
+            
+        except KeyError as e:
+            logger.error(f"Futures aggregate trade message missing key {e}: {msg}")
+        except Exception as e:
+            logger.error(f"Error handling futures aggregate trade: {e}", exc_info=True)
+            
     async def handle_futures_mark_price(msg):
-        """Handle futures mark price stream updates - non-blocking"""
+        """
+        Handle futures mark price stream updates
+        
+        {
+            "e": "markPriceUpdate",  	// Event type
+            "E": 1562305380000,      	// Event time
+            "s": "BTCUSDT",          	// Symbol
+            "p": "11794.15000000",   	// Mark price
+            "i": "11784.62659091",		// Index price
+            "P": "11784.25641265",		// Estimated Settle Price, only useful in the last hour before the settlement starts
+            "r": "0.00038167",       	// Funding rate
+            "T": 1562306400000       	// Next funding time
+        }
+        """
         try:
             # Extract data from nested structure
             data = msg.get("data", msg)
             # Get futures mark price
             state["futures_price"] = float(data["p"])
             state["futures_time"] = int(data["E"])
-            # logger.info(f"Futures mark price update: price={state['futures_price']}, time={state['futures_time']}")
+            logger.debug(f"Futures mark price update: price={state['futures_price']}, time={state['futures_time']}")
             
             # Get funding rate from mark price stream
             state["funding_rate"] = float(data["r"])
@@ -156,26 +214,26 @@ async def monitor_symbol(
                 current_signal = (signal_status, reason_text)
 
                 # Round basis and funding to respective decimal places for comparison
-                basis_rounded = round(basis * 100, 3)  # Convert to percentage and round
+                basis_rounded = round(basis * 100, 4)  # Convert to percentage and round
                 funding_rounded = round(funding * 100, 4)  # Convert to percentage and round
 
                 # Rate limiting: Only log if signal changed OR basis changed (3 decimals) OR funding changed (4 decimals)
                 should_log = (
                     current_signal != state["last_signal"]
                     or funding_rounded != state["last_funding"]
-                    # or basis_rounded != state["last_basis"]
+                    or basis_rounded != state["last_basis"]
                 )
 
                 if should_log:
                     # Log the signal
                     logger.info(
                         f"{symbol} | "
-                        f"Spot: {spot:,.4f} | Futures: {futures:,.4f} | "
-                        f"Basis: {basis*100:.3f}% | Funding: {funding*100:.4f}% | "
+                        f"Spot: {spot} | Futures: {futures} | "
+                        f"Basis: {basis*100:.4f}% | Funding: {funding*100:.4f}% | "
                         f"{signal_status}{reason_text}"
                     )
 
-                if notifier:
+                if notifier and not settings.DEBUG:
                     should_notify = all_conditions_met or all_conditions_met != state["last_all_conditions_met"]
 
                     if should_notify:
@@ -234,6 +292,7 @@ async def monitor_symbol(
                 )
                 futures_task = asyncio.create_task(
                     process_stream(futures_ws, handle_futures_mark_price, "Futures Mark Price")
+                    # process_stream(futures_ws, handle_futures_aggtrade, "Futures Aggregated Trade")
                 )
                 # Start signal evaluation loop
                 eval_task = asyncio.create_task(evaluate_signal_loop())
@@ -266,28 +325,29 @@ async def monitor_symbol(
     logger.info(f"Monitor for {symbol} terminated")
 
 
-async def main(symbols: list[str], notifier: Telegram | None = None):
+async def main(
+    symbols: list[str], 
+    min_basis: float = 0.0024,
+    safety_margin: float = 0.0004,
+    min_funding_rate: float = 0.0,
+    notifier: Telegram | None = None):
     """Main entry point for monitoring multiple symbols concurrently.
 
     Args:
         symbols: List of trading pair symbols to monitor (e.g., ["BTCUSDT", "ETHUSDT"])
         notifier: Optional Telegram notifier
     """
-    # Configuration parameters
-    MIN_BASIS = 0.0024  # 0.24%
-    SAFETY_MARGIN = 0.0004  # 0.04%
-    MIN_FUNDING_RATE = 0.0  # funding must be positive
-    ENTRY_THRESHOLD = MIN_BASIS + SAFETY_MARGIN  # 0.28%
+    entry_threshold = min_basis + safety_margin  # 0.28%
 
     logging.info("Starting Binance Spot-Futures Arbitrage Basis Monitor...")
     logging.info(f"Monitoring symbols: {', '.join(symbols)}")
-    if notifier:
+    if notifier and not settings.DEBUG:
         await notifier.text(
             f"Starting Binance Spot-Futures Arbitrage Basis Monitor for {', '.join(symbols)}"
         )
 
     logging.info(
-        f"Configuration: MIN_BASIS={MIN_BASIS*100:.2f}%, SAFETY_MARGIN={SAFETY_MARGIN*100:.2f}%, ENTRY_THRESHOLD={ENTRY_THRESHOLD*100:.2f}%"
+        f"Configuration: MIN_BASIS={min_basis*100:.2f}%, SAFETY_MARGIN={safety_margin*100:.2f}%, ENTRY_THRESHOLD={entry_threshold*100:.2f}%"
     )
 
     client = await AsyncClient.create()
@@ -304,9 +364,9 @@ async def main(symbols: list[str], notifier: Telegram | None = None):
                     symbol=symbol,
                     bsm=bsm,
                     notifier=notifier,
-                    min_basis=MIN_BASIS,
-                    safety_margin=SAFETY_MARGIN,
-                    min_funding_rate=MIN_FUNDING_RATE,
+                    min_basis=min_basis,
+                    safety_margin=safety_margin,
+                    min_funding_rate=min_funding_rate,
                 )
             )
             for symbol in symbols
@@ -322,7 +382,7 @@ async def main(symbols: list[str], notifier: Telegram | None = None):
     finally:
         # Cleanup
         await client.close_connection()
-        if notifier:
+        if notifier and not settings.DEBUG:
             await notifier.text("Binance Spot-Futures Arbitrage Monitor terminated")
             await notifier.close()
 
@@ -397,26 +457,16 @@ if __name__ == "__main__":
     setup_logging()
 
     # List of symbols to monitor
-    symbols = [
-        "BTCUSDT",  # Tier 1 - Stability anchor
-        "ETHUSDT",  # Tier 1 - Second major
-        "BNBUSDT",  # Tier 2 - Binance native advantage
-        "SOLUSDT",  # Tier 2 - High volatility plays
-        "XRPUSDT",  # Tier 2 - Volume leader
-        "ADAUSDT",  # Tier 3 - Good liquidity
-        "DOGEUSDT",  # Tier 3 - Meme coin
-        "POLUSDT",  # Tier 3 - Good liquidity
-    ]
+    symbols = [s.strip() for s in settings.SYMBOLS.split(",") if s.strip()]
 
-    # symbols = ["DOGEUSDT"]
-
+    # Initialize Telegram notifier
     token = settings.TELEGRAM_BOT_TOKEN
     chat_id = settings.TELEGRAM_CHAT_ID
     notifier = Telegram(token=token, chat_id=chat_id) if token and chat_id else None
+    logger.info("Telegram notifier %sconfigured" % ("NOT " if not notifier else ""))
+    
+    min_basis = settings.MIN_BASIS
+    safety_margin = settings.SAFETY_MARGIN
+    min_funding_rate = settings.MIN_FUNDING_RATE
 
-    if notifier:
-        logger.info("Telegram notifier configured")
-    else:
-        logger.info("Telegram notifier NOT configured")
-
-    asyncio.run(main(symbols, notifier))
+    asyncio.run(main(symbols, min_basis, safety_margin, min_funding_rate, notifier))
