@@ -2,6 +2,7 @@ import asyncio
 import logging
 import sys
 import time
+from decimal import Decimal
 from logging.handlers import TimedRotatingFileHandler
 from pathlib import Path
 
@@ -67,7 +68,7 @@ async def monitor_symbol(
             # Extract data from nested structure
             data = msg.get("data", msg)
             # Get spot price from trade stream (just update state, don't log)
-            state["spot_price"] = float(data["p"])
+            state["spot_price"] = Decimal(data["p"])
             state["spot_time"] = int(data["E"])
             logger.debug(f"Spot trade update: price={state['spot_price']}, time={state['spot_time']}, trade id={data['t']}")
             
@@ -98,7 +99,7 @@ async def monitor_symbol(
             # Extract data from nested structure
             data = msg.get("data", msg)
             # Get futures aggregate trade
-            state["futures_price"] = float(data["p"])
+            state["futures_price"] = Decimal(data["p"])
             state["futures_time"] = int(data["E"])
             logger.debug(f"Futures aggregate trade update: price={state['futures_price']}, time={state['futures_time']}, trade id={data['a']}")
             
@@ -126,12 +127,12 @@ async def monitor_symbol(
             # Extract data from nested structure
             data = msg.get("data", msg)
             # Get futures mark price
-            state["futures_price"] = float(data["p"])
+            state["futures_price"] = Decimal(data["p"])
             state["futures_time"] = int(data["E"])
             logger.debug(f"Futures mark price update: price={state['futures_price']}, time={state['futures_time']}")
             
             # Get funding rate from mark price stream
-            state["funding_rate"] = float(data["r"])
+            state["funding_rate"] = Decimal(data["r"])
         except KeyError as e:
             logger.error(f"Futures mark price message missing key {e}: {msg}")
         except Exception as e:
@@ -175,14 +176,6 @@ async def monitor_symbol(
                     await asyncio.sleep(get_sleep_delay(start_time))
                     continue
                 
-                # # make sure trade time is the same second
-                # if (spot_time // 1000) != (futures_time // 1000):
-                #     logger.info(f"[{symbol}] Skipping evaluation, mismatched trade times: spot_time={spot_time}, futures_time={futures_time}")
-                #     await asyncio.sleep(get_sleep_delay(start_time))
-                #     continue
-                # else:
-                #     logger.info(f"[{symbol}] Trade times matched: spot_time={spot_time}, futures_time={futures_time}")
-
                 # Calculate basis
                 basis = calculate_basis(spot, futures)
 
@@ -213,15 +206,11 @@ async def monitor_symbol(
                 # Create current signal snapshot
                 current_signal = (signal_status, reason_text)
 
-                # Round basis and funding to respective decimal places for comparison
-                basis_rounded = round(basis * 100, 4)  # Convert to percentage and round
-                funding_rounded = round(funding * 100, 4)  # Convert to percentage and round
-
                 # Rate limiting: Only log if signal changed OR basis changed (3 decimals) OR funding changed (4 decimals)
                 should_log = (
                     current_signal != state["last_signal"]
-                    or funding_rounded != state["last_funding"]
-                    or basis_rounded != state["last_basis"]
+                    or funding != state["last_funding"]
+                    # or basis != state["last_basis"]
                 )
 
                 if should_log:
@@ -229,11 +218,11 @@ async def monitor_symbol(
                     logger.info(
                         f"{symbol} | "
                         f"Spot: {spot} | Futures: {futures} | "
-                        f"Basis: {basis*100:.4f}% | Funding: {funding*100:.4f}% | "
+                        f"Basis: {basis*100:.4f}% | Funding: {funding*100}% | "
                         f"{signal_status}{reason_text}"
                     )
 
-                if notifier and not settings.DEBUG:
+                if notifier:
                     should_notify = all_conditions_met or all_conditions_met != state["last_all_conditions_met"]
 
                     if should_notify:
@@ -241,15 +230,15 @@ async def monitor_symbol(
                             f"Arbitrage Signal Detected:\n"
                             f"{to_humanize_time(spot_time)} | "
                             f"{symbol} | "
-                            f"Spot: {spot:,.4f} | Futures: {futures:,.4f} | "
-                            f"Basis: {basis*100:.3f}% | Funding: {funding*100:.4f}% | "
+                            f"Spot: {spot} | Futures: {futures} | "
+                            f"Basis: {basis*100:.4f}% | Funding: {funding*100}% | "
                             f"{signal_status}{reason_text}"
                         )
 
                 # Update last known states
                 state["last_signal"] = current_signal
-                state["last_basis"] = basis_rounded
-                state["last_funding"] = funding_rounded
+                state["last_basis"] = basis
+                state["last_funding"] = funding
                 state["last_all_conditions_met"] = all_conditions_met
 
             except Exception as e:
@@ -292,7 +281,6 @@ async def monitor_symbol(
                 )
                 futures_task = asyncio.create_task(
                     process_stream(futures_ws, handle_futures_mark_price, "Futures Mark Price")
-                    # process_stream(futures_ws, handle_futures_aggtrade, "Futures Aggregated Trade")
                 )
                 # Start signal evaluation loop
                 eval_task = asyncio.create_task(evaluate_signal_loop())
@@ -337,17 +325,17 @@ async def main(
         symbols: List of trading pair symbols to monitor (e.g., ["BTCUSDT", "ETHUSDT"])
         notifier: Optional Telegram notifier
     """
-    entry_threshold = min_basis + safety_margin  # 0.28%
+    entry_threshold = Decimal(str(min_basis + safety_margin))  # 0.28%
 
     logging.info("Starting Binance Spot-Futures Arbitrage Basis Monitor...")
     logging.info(f"Monitoring symbols: {', '.join(symbols)}")
-    if notifier and not settings.DEBUG:
+    if notifier:
         await notifier.text(
             f"Starting Binance Spot-Futures Arbitrage Basis Monitor for {', '.join(symbols)}"
         )
 
     logging.info(
-        f"Configuration: MIN_BASIS={min_basis*100:.2f}%, SAFETY_MARGIN={safety_margin*100:.2f}%, ENTRY_THRESHOLD={entry_threshold*100:.2f}%"
+        f"Configuration: MIN_BASIS={min_basis*100}%, SAFETY_MARGIN={safety_margin*100}%, ENTRY_THRESHOLD={entry_threshold*100}%"
     )
 
     client = await AsyncClient.create()
@@ -382,7 +370,7 @@ async def main(
     finally:
         # Cleanup
         await client.close_connection()
-        if notifier and not settings.DEBUG:
+        if notifier:
             await notifier.text("Binance Spot-Futures Arbitrage Monitor terminated")
             await notifier.close()
 
@@ -408,7 +396,7 @@ async def process_stream(stream, handler, stream_name):
         raise
 
 
-def calculate_basis(spot_price: float, futures_price: float) -> float | None:
+def calculate_basis(spot_price: Decimal, futures_price: Decimal) -> Decimal | None:
     if spot_price and futures_price:
         return (futures_price - spot_price) / spot_price
     return None
@@ -464,6 +452,8 @@ if __name__ == "__main__":
     chat_id = settings.TELEGRAM_CHAT_ID
     notifier = Telegram(token=token, chat_id=chat_id) if token and chat_id else None
     logger.info("Telegram notifier %sconfigured" % ("NOT " if not notifier else ""))
+    if settings.DEBUG:
+       notifier = None 
     
     min_basis = settings.MIN_BASIS
     safety_margin = settings.SAFETY_MARGIN
