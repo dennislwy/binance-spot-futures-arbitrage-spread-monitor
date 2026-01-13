@@ -23,14 +23,14 @@ class Settings(BaseSettings):
         description="Comma-separated list of trading symbols",
     )
     
-    MIN_BASIS: float = Field(
+    MIN_SPREAD: float = Field(
         default=0.0024,
-        description="Minimum basis threshold to trigger notifications (e.g., 0.0024 for 0.24%)",
+        description="Minimum spread threshold to trigger notifications (e.g., 0.0024 for 0.24%)",
     )
     
     SAFETY_MARGIN: float = Field(
         default=0.0004,
-        description="Safety margin to subtract from basis (e.g., 0.0004 for 0.04%)",
+        description="Safety margin to subtract from spread (e.g., 0.0004 for 0.04%)",
     )
     
     MIN_FUNDING_RATE: float = Field(
