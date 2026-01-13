@@ -234,7 +234,7 @@ async def monitor_symbol(
             logger.error(f"Error in evaluate_signal: {e}", exc_info=True)
 
     # Start WebSocket streams with automatic reconnection
-    max_retries = None  # Retry indefinitely
+    max_retries: int | None = None  # Retry indefinitely
     retry_count = 0
     retry_delay = 3  # seconds between retries
 
@@ -248,7 +248,7 @@ async def monitor_symbol(
             futures_stream = bsm.aggtrade_futures_socket(symbol)  # 100ms updates
 
             # Funding rate stream via mark price updates
-            funding_stream = bsm.symbol_mark_price_socket(symbol)  # 1s updates
+            funding_stream = bsm.symbol_mark_price_socket(symbol, fast=False)  # 3s updates
 
             # Create tasks for both streams
             async with spot_stream as spot_ws, futures_stream as futures_ws, funding_stream as funding_ws:
@@ -272,9 +272,6 @@ async def monitor_symbol(
                 funding_task = asyncio.create_task(
                     process_stream(funding_ws, handle_futures_mark_price, "Futures Mark Price")
                 )
-
-                # Start signal evaluation loop
-                # eval_task = asyncio.create_task(evaluate_signal_loop())
 
                 # Wait for all tasks
                 await asyncio.gather(spot_task, futures_task, funding_task)
