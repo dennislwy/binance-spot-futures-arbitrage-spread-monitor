@@ -54,20 +54,19 @@ Funding_Rate > 0
 ```
 
 ### Default Parameters
-| Parameter         | Value |
-| ----------------- | ----- |
-| Spot maker fee    | 0.10% |
-| Futures maker fee | 0.02% |
-| Minimum spread    | 0.24% |
-| Safety margin     | 0.04% |
-| Entry threshold   | 0.28% |
+| Parameter         | Value                                  |
+| ----------------- | -------------------------------------- |
+| Spot maker fee    | 0.10%                                  |
+| Futures maker fee | 0.02%                                  |
+| Minimum spread    | 2 * (spot fee + futures fee) = 0.24%   |
+| Safety margin     | 0.04%                                  |
+| Entry threshold   | minimum spread + safety margin = 0.28% |
 
 ## 🛠️ Installation
 
 ### Requirements
 - Python 3.12+
 - uv (Python package manager)
-- Binance account (API key not required for public data streams)
 
 ### Install dependencies
 ```bash
@@ -80,57 +79,63 @@ uv sync
 
 ## ⚙️ Configuration
 
-### Symbol Selection
-Edit the `symbols` list in `main.py` to monitor different trading pairs:
+All settings are configured via environment variables or a `.env` file. Copy the example file to get started:
 
-```python
-symbols = [
-    "BTCUSDT",   # Bitcoin - Highest liquidity
-    "ETHUSDT",   # Ethereum - Second major
-    "BNBUSDT",   # Binance Coin - Native advantage
-    "SOLUSDT",   # Solana - High volatility
-    "XRPUSDT",   # Ripple - Volume leader
-    "ADAUSDT",   # Cardano - Good liquidity
-    "DOGEUSDT",  # Dogecoin - Meme coin volatility
-    "POLUSDT",   # Polygon - DeFi token
-]
+```bash
+cp .env.example .env
 ```
+
+### Environment Variables
+
+| Variable             | Default           | Description                                              |
+| -------------------- | ----------------- | -------------------------------------------------------- |
+| `DEBUG`              | `True`            | Debug mode - disables Telegram notifications when `True` |
+| `SYMBOLS`            | `BTCUSDT,ETHUSDT` | Comma-separated list of trading pairs to monitor         |
+| `MIN_SPREAD`         | `0.0024`          | Minimum spread threshold (0.24%)                         |
+| `SAFETY_MARGIN`      | `0.0004`          | Additional safety buffer (0.04%)                         |
+| `MIN_FUNDING_RATE`   | `0.0`             | Minimum funding rate (must be positive)                  |
+| `TELEGRAM_BOT_TOKEN` | ``                | Telegram bot token for notifications                     |
+| `TELEGRAM_CHAT_ID`   | ``                | Telegram chat ID for notifications                       |
+
+### Example `.env` File
+
+```env
+# Application Configuration
+DEBUG=False
+SYMBOLS=BTCUSDT, ETHUSDT, BNBUSDT, SOLUSDT, XRPUSDT, ADAUSDT, DOGEUSDT, POLUSDT
+MIN_SPREAD=0.0024
+SAFETY_MARGIN=0.0004
+MIN_FUNDING_RATE=0.0
+
+# Notification
+TELEGRAM_BOT_TOKEN=your-telegram-bot-token-here
+TELEGRAM_CHAT_ID=your-telegram-chat-id-here
+```
+
+### Symbol Selection
+
+Configure symbols via the `SYMBOLS` environment variable (comma-separated):
 
 **Recommended tiers:**
 - **Tier 1** (BTC, ETH): Highest liquidity, tight spreads, stable funding
 - **Tier 2** (BNB, SOL, XRP): High volume, good derivatives markets
 - **Tier 3** (ADA, DOGE, POL): Moderate liquidity, higher volatility
 
-### Arbitrage Parameters
-Edit thresholds in `main.py` as needed:
-
-```python
-MIN_SPREAD = 0.0024        # 0.24% - Minimum spread required
-SAFETY_MARGIN = 0.0004    # 0.04% - Additional safety buffer
-MIN_FUNDING_RATE = 0.0    # Funding must be positive
-ENTRY_THRESHOLD = 0.28%   # Total threshold (MIN_SPREAD + SAFETY_MARGIN)
-```
-
 ### Telegram Notifications (Optional)
-Create a `.env` file in the project root:
-
-```env
-TELEGRAM_BOT_TOKEN=your_bot_token_here
-TELEGRAM_CHAT_ID=your_chat_id_here
-```
 
 To set up Telegram notifications:
 1. Create a bot via [@BotFather](https://t.me/botfather)
 2. Get your chat ID via [@userinfobot](https://t.me/userinfobot)
 3. Add credentials to `.env` file
+4. Set `DEBUG=False` to enable notifications
 
-## 🏃 Usage
+## Usage
 
 ### Run the Monitor
 
 #### Option 1: Direct Execution
 ```bash
-python main.py
+uv run python main.py
 ```
 
 #### Option 2: Run as Systemd Service (Linux)
@@ -139,7 +144,7 @@ For production deployment, you can run the monitor as a systemd service that sta
 
 **Register the service:**
 ```bash
-./service.sh register
+. service.sh register
 ```
 
 This creates and enables a systemd service with:
@@ -151,16 +156,16 @@ This creates and enables a systemd service with:
 **Manage the service:**
 ```bash
 # Start the service
-./service.sh start
+. service.sh start
 
 # Stop the service
-./service.sh stop
+. service.sh stop
 
 # Restart the service
-./service.sh restart
+. service.sh restart
 
 # Check service status
-./service.sh status
+. service.sh status
 
 # View live logs
 sudo journalctl -u binance-spot-futures-arbitrage-spread-monitor -f
@@ -171,7 +176,7 @@ sudo journalctl -u binance-spot-futures-arbitrage-spread-monitor -b
 
 **Unregister the service:**
 ```bash
-./service.sh unregister
+. service.sh unregister
 ```
 
 ### Example Output
@@ -187,7 +192,7 @@ sudo journalctl -u binance-spot-futures-arbitrage-spread-monitor -b
 - **WAIT ❌** - Conditions not met, with reason(s):
   - `Negative spread` - Spot price higher than futures
   - `Spread too small` - Spread below entry threshold
-  - `Funding unfavorable` - Negative funding rate
+  - `Negative funding` - Negative funding rate
 
 ### Logs
 Application logs are stored in:
@@ -201,33 +206,71 @@ Application logs are stored in:
 ### Multi-Symbol Concurrent Monitoring
 The application uses Python's `asyncio` to monitor multiple trading pairs concurrently:
 
-```
-┌─────────────────────────────────────────┐
-│          Main Application               │
-│  (AsyncClient + BinanceSocketManager)   │
-└─────────────────┬───────────────────────┘
-                  │
-        ┌─────────┴─────────┐
-        │                   │
-   ┌────▼─────┐      ┌─────▼────┐
-   │ BTCUSDT  │      │ ETHUSDT  │  ... (N symbols)
-   │ Monitor  │      │ Monitor  │
-   └────┬─────┘      └─────┬────┘
-        │                   │
-   ┌────┴──────┐      ┌────┴──────┐
-   │ Spot WS   │      │ Spot WS   │
-   │ Futures WS│      │ Futures WS│
-   │ Eval Loop │      │ Eval Loop │
-   └───────────┘      └───────────┘
+```mermaid
+flowchart TB
+    subgraph Main["main()"]
+        AC[AsyncClient]
+        BSM[BinanceSocketManager<br/>queue_size=2000]
+    end
+
+    AC --> BSM
+
+    subgraph Symbols["Concurrent Symbol Monitors"]
+        subgraph M1["monitor_symbol(BTCUSDT)"]
+            subgraph Streams1["WebSocket Streams"]
+                S1[Spot Trade<br/>trade_socket]
+                F1[Futures AggTrade<br/>aggtrade_futures_socket]
+                MK1[Mark Price<br/>symbol_mark_price_socket]
+            end
+            subgraph Processing1["Stream Processing"]
+                PS1[process_stream]
+                PS2[process_stream]
+                PS3[process_stream]
+            end
+            ST1[(Shared State<br/>spot_price<br/>futures_price<br/>funding_rate)]
+            TD1[ThrottledDebouncer<br/>100ms debounce<br/>500ms max_wait]
+            EV1[evaluate_signal]
+        end
+
+        subgraph M2["monitor_symbol(ETHUSDT)"]
+            S2[Spot Trade]
+            F2[Futures AggTrade]
+            MK2[Mark Price]
+            ST2[(Shared State)]
+            EV2[evaluate_signal]
+        end
+
+        MN["... (N symbols)"]
+    end
+
+    BSM --> M1
+    BSM --> M2
+    BSM --> MN
+
+    S1 --> PS1
+    F1 --> PS2
+    MK1 --> PS3
+    PS1 --> ST1
+    PS2 --> ST1
+    PS3 --> ST1
+    ST1 --> TD1
+    TD1 --> EV1
+
+    subgraph Notifications["Optional Notifications"]
+        TG[Telegram Notifier]
+    end
+
+    EV1 -->|Signal Change| TG
+    EV2 -->|Signal Change| TG
 ```
 
 **Key Components:**
 
 1. **`monitor_symbol()`** - Independent monitor for each symbol
-   - Manages WebSocket connections (spot + futures)
+   - Manages WebSocket connections (spot + futures + funding)
    - Maintains separate state for prices, funding, and signals
    - Auto-reconnects with exponential backoff on failures
-   - Evaluates arbitrage signals every 1 second
+   - Uses `ThrottledDebouncer` for rate-limited signal evaluation (100ms debounce, 500ms max wait)
 
 2. **`main()`** - Orchestrates all monitors
    - Creates concurrent tasks for all symbols
@@ -248,29 +291,33 @@ The application uses Python's `asyncio` to monitor multiple trading pairs concur
 
 ### Performance Optimizations
 
-- **Aggregated trade streams** - Reduced message volume (vs raw trades)
-- **Rate-limited logging** - Only logs on signal/metric changes
+- **Trade streams** - Real-time spot trades and futures aggregate trades
+- **Throttled evaluation** - `ThrottledDebouncer` prevents excessive processing (100ms debounce, 500ms max wait)
 - **Async I/O throughout** - Non-blocking concurrent operations
 - **Minimal state updates** - Fast in-memory operations only
 
 ## 🗂️ Project Structure
 
 ```
-binance-spot-futures-arbitrage-spread-monitor/
+spot-futures-arbitrage-spread-monitor/
 ├── main.py                 # Main application entry point
-├── config.py              # Configuration settings loader
-├── notifications.py       # Telegram notification handler
-├── pyproject.toml         # Project dependencies (uv)
-├── uv.lock               # Locked dependencies
-├── .env                  # Environment variables (not in repo)
-├── log/                  # Log files (auto-created)
-│   └── app.log          # Main application log (rotates daily)
-├── service.sh            # Systemd service management script
-├── CLAUDE.md            # Development documentation
-└── README.md            # This file
+├── core/
+│   ├── config.py           # Configuration settings (pydantic-settings)
+│   └── throttled_debouncer.py  # Async throttle/debounce utility
+├── notifications/          # Notification handlers
+│   └── telegram.py         # Telegram notification handler
+├── pyproject.toml          # Project dependencies (uv)
+├── uv.lock                 # Locked dependencies
+├── .env                    # Environment variables (not in repo)
+├── .env.example            # Example environment configuration
+├── log/                    # Log files (auto-created)
+│   └── app.log             # Main application log (rotates daily)
+├── service.sh              # Systemd service management script (Linux)
+├── CLAUDE.md               # Development documentation
+└── README.md               # This file
 ```
 
-## Troubleshooting
+## 🛠️ Troubleshooting
 
 ### WebSocket Connection Issues
 
@@ -298,7 +345,7 @@ binance-spot-futures-arbitrage-spread-monitor/
 
 **Solutions:**
 1. Reduce number of monitored symbols
-2. Increase evaluation interval (currently 1 second)
+2. Increase debounce interval in `ThrottledDebouncer` settings
 3. Check for infinite reconnection loops in logs
 4. Ensure queue size is adequate for message volume
 
@@ -356,7 +403,7 @@ binance-spot-futures-arbitrage-spread-monitor/
 5. Maintain 100% code coverage
 6. Submit a pull request
 
-## 🙏 Sponsor
+## 🍀 Sponsor
 
 Like this project? **Leave a star**! ⭐⭐⭐⭐⭐
 
