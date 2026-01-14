@@ -20,7 +20,7 @@ This project is intended as **Phase 1** of a spot–futures arbitrage system: **
 - ⚡ **Async programming** - High-performance concurrent stream processing
 - 📝 **Rate-limited logging** - Only logs when signals or key metrics change
 - 📱 **Telegram notifications** (optional) - Real-time alerts for signal changes
-- 📅 **Daily rotating logs** - 7-day retention with automatic cleanup
+- 📅 **Daily rotating logs** - 14-day retention with automatic cleanup
 
 ---
 
@@ -198,7 +198,7 @@ sudo journalctl -u binance-spot-futures-arbitrage-spread-monitor -b
 Application logs are stored in:
 - **Location**: `log/app.log`
 - **Rotation**: Daily at midnight
-- **Retention**: 7 days of backups
+- **Retention**: 14 days of backups
 - **Format**: Timestamped with function name and log level
 
 ## 🏗️ Architecture
