@@ -285,7 +285,7 @@ flowchart TB
 ### WebSocket Reliability Features
 
 - **Large queue size (2000)** - Prevents message loss during bursts
-- **Automatic reconnection** - Retries indefinitely with exponential backoff (3-60s)
+- **Automatic reconnection** - Retries indefinitely with exponential backoff (3-30s)
 - **Connection health monitoring** - Detects and recovers from failures
 - **Per-symbol isolation** - One symbol's failure doesn't affect others
 
