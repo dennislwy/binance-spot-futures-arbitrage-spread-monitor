@@ -69,9 +69,9 @@ async def monitor_symbol(
             await evaluate_signal()
             
         except KeyError as e:
-            logger.error(f"Spot trade message missing key {e}: {msg}")
+            logger.error(f"[{symbol}] Spot trade message missing key {e}: {msg}")
         except Exception as e:
-            logger.error(f"Error handling spot trade: {e}", exc_info=True)
+            logger.error(f"[{symbol}] Error handling spot trade: {e}", exc_info=True)
 
     async def handle_futures_aggtrade(msg: dict):
         """
@@ -103,9 +103,9 @@ async def monitor_symbol(
             await evaluate_signal()
             
         except KeyError as e:
-            logger.error(f"Futures aggregate trade message missing key {e}: {msg}")
+            logger.error(f"[{symbol}] Futures aggregate trade message missing key {e}: {msg}")
         except Exception as e:
-            logger.error(f"Error handling futures aggregate trade: {e}", exc_info=True)
+            logger.error(f"[{symbol}] Error handling futures aggregate trade: {e}", exc_info=True)
             
     async def handle_futures_mark_price(msg: dict):
         """
@@ -136,9 +136,9 @@ async def monitor_symbol(
             # logger.info(f"[{symbol}] Futures mark price update: price={data['p']}, funding_rate={state['funding_rate']*100}%, time={data['E']}")
             
         except KeyError as e:
-            logger.error(f"Futures mark price message missing key {e}: {msg}")
+            logger.error(f"[{symbol}] Futures mark price message missing key {e}: {msg}")
         except Exception as e:
-            logger.error(f"Error handling futures mark price: {e}", exc_info=True)
+            logger.error(f"[{symbol}] Error handling futures mark price: {e}", exc_info=True)
 
     def to_humanize_time(epoch_ms: int) -> str:
         """Convert epoch milliseconds to human-readable time string (up to milliseconds)"""
@@ -231,7 +231,7 @@ async def monitor_symbol(
             state["last_futures_price"] = futures
                     
         except Exception as e:
-            logger.error(f"Error in evaluate_signal: {e}", exc_info=True)
+            logger.error(f"[{symbol}] Error in evaluate_signal: {e}", exc_info=True)
 
     # Start WebSocket streams with automatic reconnection
     max_retries: int | None = None  # Retry indefinitely
@@ -253,7 +253,7 @@ async def monitor_symbol(
             # Create tasks for both streams
             async with spot_stream as spot_ws, futures_stream as futures_ws, funding_stream as funding_ws:
                 logger.info(
-                    f"WebSocket streams connected (attempt {retry_count + 1}). Monitoring {symbol} for arbitrage signals..."
+                    f"[{symbol}] WebSocket streams connected (attempt {retry_count + 1}). Monitoring for arbitrage signals..."
                 )
                 if retry_count > 0 and notifier:
                     await notifier.text(f"WebSocket reconnected after {retry_count} attempts")
@@ -277,28 +277,28 @@ async def monitor_symbol(
                 await asyncio.gather(spot_task, futures_task, funding_task)
 
         except KeyboardInterrupt:
-            logger.info("Shutting down gracefully...")
+            logger.info(f"[{symbol}] Shutting down gracefully...")
             break
         except Exception as e:
             retry_count += 1
             logger.error(
-                f"Error in main loop (attempt {retry_count}): {e}",
+                f"[{symbol}] Error in main loop (attempt {retry_count}): {e}",
                 exc_info=True,
             )
 
             if notifier:
                 await notifier.text(
-                    f"WebSocket error detected. Reconnecting in {retry_delay}s... (attempt {retry_count})"
+                    f"[{symbol}] WebSocket error detected. Reconnecting in {retry_delay}s... (attempt {retry_count})"
                 )
 
             # Wait before retrying
-            logger.info(f"Reconnecting in {retry_delay} seconds...")
+            logger.info(f"[{symbol}] Reconnecting in {retry_delay} seconds...")
             await asyncio.sleep(retry_delay)
 
             # Exponential backoff with max delay of 60 seconds
             retry_delay = min(retry_delay * 1.5, 60.0)
 
-    logger.info(f"Monitor for {symbol} terminated")
+    logger.info(f"[{symbol}] Monitor terminated")
 
 async def main(
     symbols: list[str], 
@@ -326,10 +326,9 @@ async def main(
     )
 
     client = await AsyncClient.create()
-    # Increase queue size to handle high-frequency market data streams
-    # For multiple symbols, we need even more buffer capacity
-    # Using 2000 to handle multiple concurrent streams
-    bsm = BinanceSocketManager(client, max_queue_size=2000)
+    queue_size = calculate_queue_size(symbols)
+    bsm = BinanceSocketManager(client, max_queue_size=queue_size)
+    logger.info(f"WebSocket max. queue size set to {queue_size}")
 
     try:
         # Create monitor tasks for all symbols
@@ -358,8 +357,26 @@ async def main(
         # Cleanup
         await client.close_connection()
         if notifier:
-            await notifier.text("Binance Spot-Futures Arbitrage Monitor terminated")
+            await notifier.text("Binance Spot-Futures Arbitrage Spread Monitor terminated")
             await notifier.close()
+
+def calculate_queue_size(symbols: list[str], buffer_seconds: int = 10) -> int:
+    """Calculate optimal queue size based on symbol count.
+    
+    Args:
+        symbols: List of trading symbols
+        buffer_seconds: Safety buffer in seconds (default: 10)
+    
+    Returns:
+        Recommended max_queue_size
+    """
+    streams_per_symbol = 3
+    avg_messages_per_second = 10  # Estimate of average messages per second per stream
+    
+    queue_size = len(symbols) * streams_per_symbol * avg_messages_per_second * buffer_seconds
+    
+    # Round up to nearest 500
+    return ((queue_size + 499) // 500) * 500
 
 async def process_stream(stream, handler, stream_name):
     """Process WebSocket stream messages - drain queue as fast as possible"""
@@ -374,6 +391,8 @@ async def process_stream(stream, handler, stream_name):
                 if asyncio.iscoroutinefunction(handler):
                     await handler(msg)
                 else:
+                    # Call synchronous handler
+                    logger.info(f"Calling synchronous handler for {stream_name}")
                     handler(msg)
             except Exception as e:
                 logger.error(f"Error in {stream_name} handler: {e}")
