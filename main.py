@@ -1,14 +1,12 @@
 import asyncio
 import logging
-import sys
 import time
 from decimal import Decimal
-from logging.handlers import TimedRotatingFileHandler
-from pathlib import Path
 
-from binance import AsyncClient, BinanceSocketManager
+from binance import AsyncClient, BinanceSocketManager, ReconnectingWebsocket
 
 from core.config import settings
+from core.logging_config import setup_logging
 from core.throttled_debouncer import ThrottledDebouncer
 from notifications import Telegram
 
@@ -23,6 +21,9 @@ async def monitor_symbol(
     min_funding_rate: float = 0.0,
 ):
     entry_threshold = Decimal(str(min_spread + safety_margin))
+    
+    # Add a lock for state synchronization
+    state_lock = asyncio.Lock()
 
     # Shared state for latest prices and funding rate (per symbol)
     state = {
@@ -61,10 +62,11 @@ async def monitor_symbol(
             # Extract data from nested structure
             data = msg.get("data", msg)
             
-            # Get spot price from trade stream (just update state, don't log)
-            state["spot_price"] = Decimal(data["p"])
-            state["spot_time"] = int(data["E"])
-            # logger.info(f"[{symbol}] Spot trade update: price={state['spot_price']}, time={state['spot_time']}, trade id={data['t']}")
+            async with state_lock:
+                # Get spot trade
+                state["spot_price"] = Decimal(data["p"])
+                state["spot_time"] = int(data["E"])
+                # logger.info(f"[{symbol}] Spot trade update: price={state['spot_price']}, time={state['spot_time']}, trade id={data['t']}")
             
             await evaluate_signal()
             
@@ -95,10 +97,11 @@ async def monitor_symbol(
             # Extract data from nested structure
             data = msg.get("data", msg)
             
-            # Get futures aggregate trade
-            state["futures_price"] = Decimal(data["p"])
-            state["futures_time"] = int(data["E"])
-            # logger.info(f"[{symbol}] Futures aggregate trade update: price={state['futures_price']}, time={state['futures_time']}, trade id={data['a']}")
+            async with state_lock:
+                # Get futures aggregate trade
+                state["futures_price"] = Decimal(data["p"])
+                state["futures_time"] = int(data["E"])
+                # logger.info(f"[{symbol}] Futures aggregate trade update: price={state['futures_price']}, time={state['futures_time']}, trade id={data['a']}")
             
             await evaluate_signal()
             
@@ -126,14 +129,15 @@ async def monitor_symbol(
             # Extract data from nested structure
             data = msg.get("data", msg)
             
-            # # Get futures mark price
-            # state["futures_price"] = Decimal(data["p"])
-            # state["futures_time"] = int(data["E"])
-            # logger.debug(f"Futures mark price update: price={state['futures_price']}, time={state['futures_time']}")
-            
-            # Get funding rate from mark price stream
-            state["funding_rate"] = Decimal(data["r"])
-            # logger.info(f"[{symbol}] Futures mark price update: price={data['p']}, funding_rate={state['funding_rate']*100}%, time={data['E']}")
+            async with state_lock:
+                # # Get futures mark price
+                # state["futures_price"] = Decimal(data["p"])
+                # state["futures_time"] = int(data["E"])
+                # logger.debug(f"Futures mark price update: price={state['futures_price']}, time={state['futures_time']}")
+                
+                # Get funding rate from mark price stream
+                state["funding_rate"] = Decimal(data["r"])
+                # logger.info(f"[{symbol}] Futures mark price update: price={data['p']}, funding_rate={state['funding_rate']*100}%, time={data['E']}")
             
         except KeyError as e:
             logger.error(f"[{symbol}] Futures mark price message missing key {e}: {msg}")
@@ -145,94 +149,112 @@ async def monitor_symbol(
         return time.strftime(
             "%Y-%m-%d %H:%M:%S", time.localtime(epoch_ms / 1000)
         ) + f".{epoch_ms % 1000:03d}"
-
+    
+    def calculate_spread(spot_price: Decimal, futures_price: Decimal) -> Decimal | None:
+        if spot_price and futures_price:
+            return (futures_price - spot_price) / spot_price
+        return None
+    
     @ThrottledDebouncer(debounce_ms=100, max_wait_ms=500)
     async def evaluate_signal():
         try:
-            spot = state["spot_price"]
-            spot_time = state["spot_time"]
-            futures = state["futures_price"]
-            futures_time = state["futures_time"]
-            funding = state["funding_rate"]
-            
-            # Wait until we have all data and prices have changed
-            if ((spot == state["last_spot_price"] and futures == state["last_futures_price"]) 
-                or spot is None 
-                or futures is None 
-                or funding is None):
-                # logger.warning(f"[{symbol}] Skipping evaluation: incomplete data or no price change (spot: {spot}, futures: {futures}, funding: {funding})")
-                return
-            
-            # Calculate new spread
-            spread = calculate_spread(spot, futures)
-            
-            # Evaluate conditions
-            conditions = {
-                "positive_spread": futures > spot,
-                "spread_threshold": spread >= entry_threshold,
-                "funding_positive": funding > min_funding_rate,
-            }
-            
-            # Determine signal
-            all_conditions_met = all(conditions.values())
-            
-            # Format output
-            signal_status = "ENTER ✅" if all_conditions_met else "WAIT ❌"
-
-            # Build reason if not entering
-            reasons = []
-            if not conditions["positive_spread"]:
-                reasons.append("Negative spread")
-            if not conditions["spread_threshold"] and conditions["positive_spread"]:
-                reasons.append("Spread too small")
-            if not conditions["funding_positive"]:
-                reasons.append("Negative funding")
-
-            reason_text = f" ({', '.join(reasons)})" if reasons else ""
-
-            # Create current signal snapshot
-            current_signal = (signal_status, reason_text)
-            
-            # Rate limiting: Only log if signal changed OR spread changed OR funding changed
-            # should_log = (
-            #     current_signal != state["last_signal"]
-            #     or spread != state["last_spread"]
-            #     or funding != state["last_funding"]
-            # )
-
-            # if should_log:
-            #     # Log the signal
-            #     logger.info(
-            #         f"{symbol} | "
-            #         f"Spot: {spot} | Futures: {futures} | "
-            #         f"Spread: {spread*100:.4f}% | Funding: {funding*100}% | "
-            #         f"{signal_status}{reason_text}"
-            #     )
-            
-            if notifier:
-                should_notify = all_conditions_met or all_conditions_met != state["last_all_conditions_met"]
+            async with state_lock:  # Protect state reads
+                spot = state["spot_price"]
+                spot_time = state["spot_time"]
+                futures = state["futures_price"]
+                futures_time = state["futures_time"]
+                funding = state["funding_rate"]
+                last_all_conditions_met = state["last_all_conditions_met"]
+                last_spot_price = state["last_spot_price"]
+                last_futures_price = state["last_futures_price"]
+                # last_spread = state["last_spread"]
                 
-                if should_notify:
-                    msg = (f"{symbol} | "
+                # Wait until we have all data and prices have changed
+                if ((spot == last_spot_price and futures == last_futures_price) 
+                    or spot is None 
+                    or futures is None 
+                    or funding is None):
+                    # logger.warning(f"[{symbol}] Skipping evaluation: incomplete data or no price change (spot: {spot}, futures: {futures}, funding: {funding})")
+                    return
+
+                # Calculate new spread
+                spread = calculate_spread(spot, futures)
+                
+                # Evaluate conditions
+                conditions = {
+                    "positive_spread": futures > spot,
+                    "spread_threshold": spread >= entry_threshold,
+                    "funding_positive": funding > min_funding_rate,
+                }
+                
+                # Determine signal
+                all_conditions_met = all(conditions.values())
+                signal_status = "ENTER ✅" if all_conditions_met else "WAIT ❌"
+
+                # Build reason if not entering
+                reasons = []
+                if not conditions["positive_spread"]:
+                    reasons.append("Negative spread")
+                if not conditions["spread_threshold"] and conditions["positive_spread"]:
+                    reasons.append("Spread too small")
+                if not conditions["funding_positive"]:
+                    reasons.append("Negative funding")
+
+                reason_text = f" ({', '.join(reasons)})" if reasons else ""
+
+                # Create current signal snapshot
+                current_signal = (signal_status, reason_text)
+                
+                # Determine notification before updating
+                should_notify = all_conditions_met or all_conditions_met != last_all_conditions_met
+                # should_log = spread != last_spread and symbol == "BTCUSDT"
+                
+                # Update state atomically
+                state["last_spot_price"] = spot
+                state["last_futures_price"] = futures
+                state["last_funding"] = funding
+                state["last_spread"] = spread
+                state["last_signal"] = current_signal
+                state["last_all_conditions_met"] = all_conditions_met
+                
+                # if should_log:
+                #     log_msg = (f"{symbol} | "
+                #         f"{to_humanize_time(max(spot_time, futures_time))} | "
+                #         f"Spot: {spot} | Futures: {futures} | "
+                #         f"Spread: {spread*100:.5f}% | Funding: {funding*100:.5f}%")
+                        
+                # Send notification
+                if should_notify and notifier:
+                    notification_msg = (f"{symbol} | "
                         f"{to_humanize_time(max(spot_time, futures_time))} | "
                         f"Spot: {spot} | Futures: {futures} | "
-                        f"Spread: {spread*100:.4f}% | Funding: {funding*100}% | "
+                        f"Spread: {spread*100:.5f}% | Funding: {funding*100:.5f}% | "
                         f"{signal_status}{reason_text}")
-                    
-                    logger.info(msg)
-                    await notifier.text(msg)
-
-            # Update last known states
-            state["last_signal"] = current_signal
-            state["last_spread"] = spread
-            state["last_funding"] = funding
-            state["last_all_conditions_met"] = all_conditions_met
-            state["last_spot_price"] = spot
-            state["last_futures_price"] = futures
+            
+            # Only I/O happens outside lock
+            # if should_log:
+            #     logger.info(log_msg)
+            
+            if should_notify and notifier:
+                logger.info(notification_msg)
+                await notifier.text(notification_msg)
                     
         except Exception as e:
             logger.error(f"[{symbol}] Error in evaluate_signal: {e}", exc_info=True)
 
+    async def process_stream(stream: ReconnectingWebsocket, handler: callable, symbol: str, stream_name: str):
+        """Process WebSocket stream messages - drain queue as fast as possible"""
+        try:
+            while True:
+                msg = await stream.recv()
+                try:
+                    await handler(msg)
+                except Exception as e:
+                    logger.error(f"[{symbol}] Error in {stream_name} handler: {e}")
+        except Exception as e:
+            logger.error(f"[{symbol}] {stream_name} stream error: {e}", exc_info=True)
+            raise
+    
     # Start WebSocket streams with automatic reconnection
     max_retries: int | None = None  # Retry indefinitely
     retry_count = 0
@@ -264,13 +286,13 @@ async def monitor_symbol(
 
                 # Process messages concurrently
                 spot_task = asyncio.create_task(
-                    process_stream(spot_ws, handle_spot_trade, "Spot Aggregated Trade")
+                    process_stream(spot_ws, handle_spot_trade, symbol, "Spot Aggregated Trade")
                 )
                 futures_task = asyncio.create_task(
-                    process_stream(futures_ws, handle_futures_aggtrade, "Futures Aggregated Trade")
+                    process_stream(futures_ws, handle_futures_aggtrade, symbol, "Futures Aggregated Trade")
                 )
                 funding_task = asyncio.create_task(
-                    process_stream(funding_ws, handle_futures_mark_price, "Futures Mark Price")
+                    process_stream(funding_ws, handle_futures_mark_price, symbol, "Futures Mark Price")
                 )
 
                 # Wait for all tasks
@@ -295,8 +317,8 @@ async def monitor_symbol(
             logger.info(f"[{symbol}] Reconnecting in {retry_delay} seconds...")
             await asyncio.sleep(retry_delay)
 
-            # Exponential backoff with max delay of 60 seconds
-            retry_delay = min(retry_delay * 1.5, 60.0)
+            # Exponential backoff with max delay of 30 seconds
+            retry_delay = min(retry_delay * 1.5, 30.0)
 
     logger.info(f"[{symbol}] Monitor terminated")
 
@@ -326,7 +348,7 @@ async def main(
     )
 
     client = await AsyncClient.create()
-    queue_size = calculate_queue_size(symbols)
+    queue_size = calculate_queue_size(symbols, buffer_seconds=10)
     bsm = BinanceSocketManager(client, max_queue_size=queue_size)
     logger.info(f"WebSocket max. queue size set to {queue_size}")
 
@@ -377,71 +399,6 @@ def calculate_queue_size(symbols: list[str], buffer_seconds: int = 10) -> int:
     
     # Round up to nearest 500
     return ((queue_size + 499) // 500) * 500
-
-async def process_stream(stream, handler, stream_name):
-    """Process WebSocket stream messages - drain queue as fast as possible"""
-    try:
-        while True:
-            msg = await stream.recv()
-            # Process message without await to avoid blocking
-            # Handler functions are already async but they don't await anything
-            # So we can call them synchronously for maximum speed
-            try:
-                # Call handler directly (handlers are very fast, just update state)
-                if asyncio.iscoroutinefunction(handler):
-                    await handler(msg)
-                else:
-                    # Call synchronous handler
-                    logger.info(f"Calling synchronous handler for {stream_name}")
-                    handler(msg)
-            except Exception as e:
-                logger.error(f"Error in {stream_name} handler: {e}")
-    except Exception as e:
-        logger.error(f"{stream_name} stream error: {e}", exc_info=True)
-        raise
-    
-def calculate_spread(spot_price: Decimal, futures_price: Decimal) -> Decimal | None:
-    if spot_price and futures_price:
-        return (futures_price - spot_price) / spot_price
-    return None
-
-def setup_logging() -> None:
-    """Configure logging system based on settings.
-
-    Args:
-        settings (Settings): Configuration containing log level and format preferences
-    """
-    # Create log directory if it doesn't exist
-    log_file = Path("log/app.log")
-    log_file.parent.mkdir(parents=True, exist_ok=True)
-
-    # Create a timed rotating file handler that rotates daily at midnight
-    file_handler = TimedRotatingFileHandler(
-        filename=str(log_file),
-        when="midnight",  # Rotate at midnight
-        interval=1,  # Rotate every 1 day
-        backupCount=7,  # Keep 7 backup files (7 days of logs)
-        encoding="utf-8",  # Use UTF-8 encoding for log files
-    )
-
-    # Set the suffix for rotated files (adds date to filename)
-    file_handler.suffix = "%Y-%m-%d"
-
-    # Create console handler for stdout output with UTF-8 encoding
-    # Reconfigure stdout to use UTF-8 for Windows compatibility
-    if sys.stdout.encoding != "utf-8":
-        import io
-
-        sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace")
-
-    console_handler = logging.StreamHandler(sys.stdout)
-
-    # Configure root logger
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s [%(name)20.20s][%(funcName)20.20s][%(levelname)5.5s] %(message)s",
-        handlers=[file_handler, console_handler],
-    )
 
 if __name__ == "__main__":
     setup_logging()
