@@ -8,7 +8,7 @@ This is a real-time Python application that monitors Binance spot and USDT-M fut
 
 **Core Strategy:**
 - Long Spot BTC + Short BTCUSDT Perpetual Futures
-- Entry signal requires: positive basis, minimum threshold met, positive funding rate, and safety margin
+- Entry signal requires: positive spread, minimum threshold met, positive funding rate, and safety margin
 
 ## Running the Application
 
@@ -29,7 +29,7 @@ The application will start logging to both console and `log/app.log` with daily 
 ### Entry Point: `main.py`
 - `setup_logging()`: Configures dual logging (console + rotating file handler in `log/`)
 - `main()`: Async entry point that initializes Binance client and socket manager
-- `calculate_basis(spot_price, futures_price)`: Calculates spot-futures basis percentage
+- `calculate_spread(spot_price, futures_price)`: Calculates spot-futures spread percentage
 
 ### Key Components (To Be Implemented)
 The main application loop is currently a placeholder. Implementation should:
@@ -37,18 +37,18 @@ The main application loop is currently a placeholder. Implementation should:
    - Spot trade stream (BTCUSDT spot price)
    - Futures mark price stream (BTCUSDT perpetual)
    - Funding rate stream
-2. Calculate real-time basis: `(futures_price - spot_price) / spot_price`
+2. Calculate real-time spread: `(futures_price - spot_price) / spot_price`
 3. Evaluate entry conditions based on configured thresholds
 
 ### Configuration Parameters (in `main.py`)
-- `MIN_BASIS`: Minimum basis threshold (default: 0.24%)
+- `MIN_SPREAD`: Minimum spread threshold (default: 0.24%)
 - `SAFETY_MARGIN`: Additional safety buffer (default: 0.04%)
 - `MIN_FUNDING_RATE`: Funding rate threshold (default: 0.0, must be positive)
 
 Fee structure assumed:
 - Spot maker fee: 0.10%
 - Futures maker fee: 0.02%
-- Entry threshold: 0.28% (MIN_BASIS + SAFETY_MARGIN)
+- Entry threshold: 0.28% (MIN_SPREAD + SAFETY_MARGIN)
 
 ## Technology Stack
 

@@ -1,7 +1,7 @@
 [project]
-name = "spot-futures-arbitrage-basis-monitor"
+name = "binance-spot-futures-arbitrage-spread-monitor"
 version = "0.1.0"
-description = "A real-time application that listens to Binance Spot and USDT-M Futures WebSocket streams, calculates the spot–futures basis, and applies a funding-rate filter to determine whether a spot–futures arbitrage opportunity is worth entering"
+description = "A real-time application that listens to Binance Spot and USDT-M Futures WebSocket streams, calculates the spot–futures spread, and applies a funding-rate filter to determine whether a spot–futures arbitrage opportunity is worth entering"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [

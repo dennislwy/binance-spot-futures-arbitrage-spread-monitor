@@ -777,7 +777,7 @@ wheels = [
 ]
 
 [[package]]
-name = "spot-futures-arbitrage-basis-monitor"
+name = "binance-spot-futures-arbitrage-spread-monitor"
 version = "0.1.0"
 source = { virtual = "." }
 dependencies = [

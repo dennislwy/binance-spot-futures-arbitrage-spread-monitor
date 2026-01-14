@@ -1,6 +1,6 @@
 #!/bin/bash
 
-SERVICE_NAME="spot-futures-arbitrage-basis-monitor"
+SERVICE_NAME="binance-spot-futures-arbitrage-spread-monitor"
 SERVICE_FILE="/etc/systemd/system/${SERVICE_NAME}.service"
 APP_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
@@ -9,7 +9,7 @@ function register() {
     
     sudo tee $SERVICE_FILE > /dev/null <<EOF
 [Unit]
-Description=Spot-Futures Arbitrage Basis Monitor
+Description=Spot-Futures Arbitrage Spread Monitor
 After=network-online.target
 Wants=network-online.target
 

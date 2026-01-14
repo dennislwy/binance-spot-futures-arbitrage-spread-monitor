@@ -1,19 +1,19 @@
-# Binance Spot–Futures Arbitrage Basis Monitor
+# Binance Spot–Futures Arbitrage Spread Monitor
 
-A real-time application that listens to **Binance Spot and USDT-M Futures WebSocket streams**, calculates the **spot–futures basis**, and applies a **funding-rate filter** to determine whether a **spot–futures arbitrage opportunity** is worth entering.
+A real-time application that listens to **Binance Spot and USDT-M Futures WebSocket streams**, calculates the **spot–futures spread**, and applies a **funding-rate filter** to determine whether a **spot–futures arbitrage opportunity** is worth entering.
 
 This project is intended as **Phase 1** of a spot–futures arbitrage system: **signal generation only** (no order execution).
 
 ---
 
-## Features
+## 🌟 Features
 
 - 📡 **Multi-symbol monitoring** - Track multiple trading pairs concurrently
 - 🔄 Real-time **spot prices** via aggregated trade streams
 - 📈 Real-time **futures mark prices** and **funding rates**
-- 📊 Live **basis (%) calculation** for each symbol
+- 📊 Live **spread (%) calculation** for each symbol
 - 🚦 Arbitrage entry signals based on:
-  - Minimum basis threshold (fee-aware)
+  - Minimum spread threshold (fee-aware)
   - Safety margin
   - Funding-rate direction (short receives funding)
 - 🔌 **WebSocket with auto-reconnection** - Exponential backoff retry logic
@@ -24,7 +24,7 @@ This project is intended as **Phase 1** of a spot–futures arbitrage system: **
 
 ---
 
-## Arbitrage Logic
+## ⚖️ Arbitrage Logic
 
 This script evaluates the classic arbitrage structure:
 
@@ -33,36 +33,36 @@ This script evaluates the classic arbitrage structure:
 
 An arbitrage signal is produced **only if all conditions are met**:
 
-1. Futures price > Spot price (positive basis)
-2. Basis ≥ minimum required basis (fees included)
+1. Futures price > Spot price (positive spread)
+2. Spread ≥ minimum required spread (fees included)
 3. Funding rate > 0 (short futures receives funding)
 4. Safety margin is satisfied
 
 ---
 
-## Basis Formula
+### Spread Formula
 
 ```text
-Basis (%) = (Futures_Price − Spot_Price) / Spot_Price × 100
+Spread (%) = (Futures_Price − Spot_Price) / Spot_Price × 100
 ```
 
-## Entry Condition
+### Entry Condition
 ```text
-Basis ≥ (Minimum_Basis + Safety_Margin)
+Spread ≥ (Minimum_Spread + Safety_Margin)
 AND
 Funding_Rate > 0
 ```
 
-## Default Parameters
+### Default Parameters
 | Parameter         | Value |
 | ----------------- | ----- |
 | Spot maker fee    | 0.10% |
 | Futures maker fee | 0.02% |
-| Minimum basis     | 0.24% |
+| Minimum spread    | 0.24% |
 | Safety margin     | 0.04% |
 | Entry threshold   | 0.28% |
 
-## Installation
+## 🛠️ Installation
 
 ### Requirements
 - Python 3.12+
@@ -78,7 +78,7 @@ curl -LsSf https://astral.sh/uv/install.sh | sh
 uv sync
 ```
 
-## Configuration
+## ⚙️ Configuration
 
 ### Symbol Selection
 Edit the `symbols` list in `main.py` to monitor different trading pairs:
@@ -105,10 +105,10 @@ symbols = [
 Edit thresholds in `main.py` as needed:
 
 ```python
-MIN_BASIS = 0.0024        # 0.24% - Minimum basis required
+MIN_SPREAD = 0.0024        # 0.24% - Minimum spread required
 SAFETY_MARGIN = 0.0004    # 0.04% - Additional safety buffer
 MIN_FUNDING_RATE = 0.0    # Funding must be positive
-ENTRY_THRESHOLD = 0.28%   # Total threshold (MIN_BASIS + SAFETY_MARGIN)
+ENTRY_THRESHOLD = 0.28%   # Total threshold (MIN_SPREAD + SAFETY_MARGIN)
 ```
 
 ### Telegram Notifications (Optional)
@@ -124,7 +124,7 @@ To set up Telegram notifications:
 2. Get your chat ID via [@userinfobot](https://t.me/userinfobot)
 3. Add credentials to `.env` file
 
-## Usage
+## 🏃 Usage
 
 ### Run the Monitor
 
@@ -163,10 +163,10 @@ This creates and enables a systemd service with:
 ./service.sh status
 
 # View live logs
-sudo journalctl -u spot-futures-arbitrage-basis-monitor -f
+sudo journalctl -u binance-spot-futures-arbitrage-spread-monitor -f
 
 # View logs from last boot
-sudo journalctl -u spot-futures-arbitrage-basis-monitor -b
+sudo journalctl -u binance-spot-futures-arbitrage-spread-monitor -b
 ```
 
 **Unregister the service:**
@@ -176,17 +176,17 @@ sudo journalctl -u spot-futures-arbitrage-basis-monitor -b
 
 ### Example Output
 ```text
-2026-01-07 22:53:28 [   __main__][evaluate_signal_loop][ INFO] BTCUSDT | Spot: 91,894.5000 | Futures: 91,850.6100 | Basis: -0.048% | Funding: 0.0037% | WAIT ❌ (Negative basis)
-2026-01-07 22:53:28 [   __main__][evaluate_signal_loop][ INFO] ETHUSDT | Spot: 3,191.9000 | Futures: 3,189.5100 | Basis: -0.075% | Funding: 0.0022% | WAIT ❌ (Negative basis)
-2026-01-07 22:53:29 [   __main__][evaluate_signal_loop][ INFO] BTCUSDT | Spot: 91,899.2400 | Futures: 91,853.9000 | Basis: -0.049% | Funding: 0.0037% | WAIT ❌ (Negative basis)
-2026-01-07 22:53:30 [   __main__][evaluate_signal_loop][ INFO] ETHUSDT | Spot: 3,191.4100 | Futures: 3,190.3400 | Basis: -0.034% | Funding: 0.0022% | WAIT ❌ (Negative basis)
+2026-01-07 22:53:28 [   __main__][evaluate_signal_loop][ INFO] BTCUSDT | Spot: 91,894.5000 | Futures: 91,850.6100 | Spread: -0.048% | Funding: 0.0037% | WAIT ❌ (Negative spread)
+2026-01-07 22:53:28 [   __main__][evaluate_signal_loop][ INFO] ETHUSDT | Spot: 3,191.9000 | Futures: 3,189.5100 | Spread: -0.075% | Funding: 0.0022% | WAIT ❌ (Negative spread)
+2026-01-07 22:53:29 [   __main__][evaluate_signal_loop][ INFO] BTCUSDT | Spot: 91,899.2400 | Futures: 91,853.9000 | Spread: -0.049% | Funding: 0.0037% | WAIT ❌ (Negative spread)
+2026-01-07 22:53:30 [   __main__][evaluate_signal_loop][ INFO] ETHUSDT | Spot: 3,191.4100 | Futures: 3,190.3400 | Spread: -0.034% | Funding: 0.0022% | WAIT ❌ (Negative spread)
 ```
 
 ### Signal Interpretation
 - **ENTER ✅** - All conditions met, arbitrage opportunity detected
 - **WAIT ❌** - Conditions not met, with reason(s):
-  - `Negative basis` - Spot price higher than futures
-  - `Basis too small` - Basis below entry threshold
+  - `Negative spread` - Spot price higher than futures
+  - `Spread too small` - Spread below entry threshold
   - `Funding unfavorable` - Negative funding rate
 
 ### Logs
@@ -196,7 +196,7 @@ Application logs are stored in:
 - **Retention**: 7 days of backups
 - **Format**: Timestamped with function name and log level
 
-## Architecture
+## 🏗️ Architecture
 
 ### Multi-Symbol Concurrent Monitoring
 The application uses Python's `asyncio` to monitor multiple trading pairs concurrently:
@@ -253,10 +253,10 @@ The application uses Python's `asyncio` to monitor multiple trading pairs concur
 - **Async I/O throughout** - Non-blocking concurrent operations
 - **Minimal state updates** - Fast in-memory operations only
 
-## Project Structure
+## 🗂️ Project Structure
 
 ```
-spot-futures-arbitrage-basis-monitor/
+binance-spot-futures-arbitrage-spread-monitor/
 ├── main.py                 # Main application entry point
 ├── config.py              # Configuration settings loader
 ├── notifications.py       # Telegram notification handler
@@ -316,8 +316,8 @@ spot-futures-arbitrage-basis-monitor/
 **Symptom**: Service fails to start or keeps restarting
 
 **Solutions:**
-1. Check service status: `sudo systemctl status spot-futures-arbitrage-basis-monitor`
-2. View detailed logs: `sudo journalctl -u spot-futures-arbitrage-basis-monitor -n 100`
+1. Check service status: `sudo systemctl status binance-spot-futures-arbitrage-spread-monitor`
+2. View detailed logs: `sudo journalctl -u binance-spot-futures-arbitrage-spread-monitor -n 100`
 3. Verify uv is installed at `~/.local/bin/uv`
 4. Check `.env` file exists and has correct permissions
 5. Ensure working directory path is correct in service file
@@ -328,9 +328,9 @@ spot-futures-arbitrage-basis-monitor/
 **Solutions:**
 1. Check StandardOutput/StandardError are set to `journal` in service file
 2. Logs also written to `log/app.log` as backup
-3. Use `sudo journalctl -u spot-futures-arbitrage-basis-monitor --no-pager` to see all logs
+3. Use `sudo journalctl -u binance-spot-futures-arbitrage-spread-monitor --no-pager` to see all logs
 
-## Limitations & Future Enhancements
+## ⚠️ Limitations & Future Enhancements
 
 **Current Limitations:**
 - Signal generation only (no order execution)
@@ -341,21 +341,34 @@ spot-futures-arbitrage-basis-monitor/
 **Planned Enhancements (Phase 2+):**
 - Automated order execution
 - Per-symbol threshold configuration
-- Historical basis analysis and statistics
+- Historical spread analysis and statistics
 - Position tracking and P&L calculation
 - Risk management modules
 - Web dashboard for monitoring
 - Database storage for signal history
 
-## Contributing
+## 🤝 Contributing
 
-This is a personal project for spot-futures arbitrage signal monitoring. Feel free to fork and adapt for your own use.
+1. Fork the repository
+2. Create a new branch (`git checkout -b feature/your-feature-name`)
+3. Make your changes with tests
+4. Ensure all tests pass: `uv run pytest tests/`
+5. Maintain 100% code coverage
+6. Submit a pull request
 
-## License
+## 🙏 Sponsor
 
-MIT License - See LICENSE file for details
+Like this project? **Leave a star**! ⭐⭐⭐⭐⭐
 
-## Disclaimer
+You love what I do? <a href="https://www.buymeacoffee.com/dennislwy" target="_blank"><img src="https://cdn.buymeacoffee.com/buttons/default-orange.png" alt="Buy Me A Coffee" height="41" width="174"></a>
+
+Recognized my open-source contributions? [Nominate me](https://stars.github.com/nominate) as GitHub Star! 💫
+
+## 📄 License
+
+This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
+
+## ⚠️ Disclaimer
 
 **This software is for educational and informational purposes only.**
 
