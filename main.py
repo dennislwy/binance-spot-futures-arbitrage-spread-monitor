@@ -383,7 +383,7 @@ async def monitor_symbol(
 
                 # Determine if notification should be sent
                 # Notify on: entry signal, or any state transition
-                should_notify = all_conditions_met or all_conditions_met != last_all_conditions_met
+                should_notify = all_conditions_met != last_all_conditions_met
 
                 # Update state atomically before releasing lock
                 state["last_spot_price"] = spot
