@@ -387,7 +387,7 @@ async def monitor_symbol(
                 
                 # Log on: zero seconds on every hour
                 localtime = time.localtime()
-                should_log = localtime.tm_min == 0 and localtime.tm_sec == 0
+                should_log = symbol == "BTCUSDT" and localtime.tm_min == 0 and localtime.tm_sec == 0
 
                 # Update state atomically before releasing lock
                 state["last_spot_price"] = spot
