@@ -384,6 +384,10 @@ async def monitor_symbol(
                 # Determine if notification should be sent
                 # Notify on: entry signal, or any state transition
                 should_notify = all_conditions_met != last_all_conditions_met
+                
+                # Log on: zero seconds on every hour
+                localtime = time.localtime()
+                should_log = localtime.tm_min == 0 and localtime.tm_sec == 0
 
                 # Update state atomically before releasing lock
                 state["last_spot_price"] = spot
@@ -393,6 +397,13 @@ async def monitor_symbol(
                 state["last_signal"] = current_signal
                 state["last_all_conditions_met"] = all_conditions_met
 
+                # Prepare log message if logging is scheduled
+                if should_log:
+                    log_msg = (f"{symbol} | "
+                        f"{to_humanize_time(max(spot_time, futures_time))} | "
+                        f"Spot: {spot} | Futures: {futures} | "
+                        f"Spread: {spread*100:.5f}% | Funding: {funding*100:.5f}%")
+
                 # Prepare notification message while still holding state snapshot
                 if should_notify and notifier:
                     notification_msg = (f"{symbol} | "
@@ -400,8 +411,11 @@ async def monitor_symbol(
                         f"Spot: {spot} | Futures: {futures} | "
                         f"Spread: {spread*100:.5f}% | Funding: {funding*100:.5f}% | "
                         f"{signal_status}{reason_text}")
-
+                    
             # Perform I/O outside of lock to minimize lock contention
+            if should_log:
+                logger.info(log_msg)
+            
             if should_notify and notifier:
                 logger.info(notification_msg)
                 await notifier.text(notification_msg)
