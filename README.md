@@ -12,10 +12,11 @@ This project is intended as **Phase 1** of a spot–futures arbitrage system: **
 - 🔄 Real-time **spot prices** via aggregated trade streams
 - 📈 Real-time **futures mark prices** and **funding rates**
 - 📊 Live **spread (%) calculation** for each symbol
-- 🚦 Arbitrage entry signals based on:
+- 🚦 Arbitrage **entry signals** based on:
   - Minimum spread threshold (fee-aware)
   - Safety margin
   - Funding-rate direction (short receives funding)
+- 🚪 Arbitrage **exit signals** when spread falls below threshold
 - 🔌 **WebSocket with auto-reconnection** - Exponential backoff retry logic
 - ⚡ **Async programming** - High-performance concurrent stream processing
 - 📝 **Rate-limited logging** - Only logs when signals or key metrics change
@@ -31,12 +32,15 @@ This script evaluates the classic arbitrage structure:
 - **Long Spot BTC**
 - **Short BTCUSDT Perpetual Futures**
 
-An arbitrage signal is produced **only if all conditions are met**:
+An **entry signal** is produced **only if all conditions are met**:
 
 1. Futures price > Spot price (positive spread)
 2. Spread ≥ minimum required spread (fees included)
 3. Funding rate > 0 (short futures receives funding)
 4. Safety margin is satisfied
+
+An **exit signal** is produced when:
+- Currently in position AND spread ≤ EXIT_MAX_SPREAD threshold
 
 ---
 
@@ -53,6 +57,11 @@ AND
 Funding_Rate > 0
 ```
 
+### Exit Condition
+```text
+Spread ≤ EXIT_MAX_SPREAD
+```
+
 ### Default Parameters
 | Parameter         | Value                                  |
 | ----------------- | -------------------------------------- |
@@ -61,6 +70,7 @@ Funding_Rate > 0
 | Minimum spread    | 2 * (spot fee + futures fee) = 0.24%   |
 | Safety margin     | 0.04%                                  |
 | Entry threshold   | minimum spread + safety margin = 0.28% |
+| Exit max spread   | 0.0% (close when spread ≤ 0)           |
 
 ## 🛠️ Installation
 
@@ -94,6 +104,7 @@ cp .env.example .env
 | `MIN_SPREAD`         | `0.0024`          | Minimum spread threshold (0.24%)                         |
 | `SAFETY_MARGIN`      | `0.0004`          | Additional safety buffer (0.04%)                         |
 | `MIN_FUNDING_RATE`   | `0.0`             | Minimum funding rate (must be positive)                  |
+| `EXIT_MAX_SPREAD`    | `0.0`             | Exit signal threshold (0.0% - exit when spread ≤ 0)      |
 | `TELEGRAM_BOT_TOKEN` | ``                | Telegram bot token for notifications                     |
 | `TELEGRAM_CHAT_ID`   | ``                | Telegram chat ID for notifications                       |
 
@@ -103,9 +114,14 @@ cp .env.example .env
 # Application Configuration
 DEBUG=False
 SYMBOLS=BTCUSDT, ETHUSDT, BNBUSDT, SOLUSDT, XRPUSDT, ADAUSDT, DOGEUSDT, POLUSDT
+
+# Entry Configurations
 MIN_SPREAD=0.0024
 SAFETY_MARGIN=0.0004
 MIN_FUNDING_RATE=0.0
+
+# Exit Configurations
+EXIT_MAX_SPREAD=0.0
 
 # Notification
 TELEGRAM_BOT_TOKEN=your-telegram-bot-token-here
@@ -188,11 +204,17 @@ sudo journalctl -u binance-spot-futures-arbitrage-spread-monitor -b
 ```
 
 ### Signal Interpretation
-- **ENTER ✅** - All conditions met, arbitrage opportunity detected
-- **WAIT ❌** - Conditions not met, with reason(s):
+- **ENTER ✅** - All entry conditions met, arbitrage opportunity detected (transitions to IN_POSITION)
+- **EXIT ✅** - Exit condition met, time to close position (transitions to NO_POSITION)
+- **WAIT ❌** - Entry conditions not met, with reason(s):
   - `Negative spread` - Spot price higher than futures
   - `Spread too small` - Spread below entry threshold
   - `Negative funding` - Negative funding rate
+
+### State Machine
+The monitor tracks position state per symbol:
+- **NO_POSITION** → Monitors for entry conditions → **ENTER ✅** → **IN_POSITION**
+- **IN_POSITION** → Monitors for exit condition → **EXIT ✅** → **NO_POSITION**
 
 ### Logs
 Application logs are stored in:

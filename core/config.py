@@ -37,7 +37,13 @@ class Settings(BaseSettings):
         default=0.0,
         description="Minimum funding rate threshold (e.g., 0.0 for positive funding)",
     )
-    
+
+    # Exit Configuration
+    EXIT_MAX_SPREAD: float = Field(
+        default=0.0,
+        description="Maximum spread threshold to trigger exit signal (e.g., 0.0 for 0%)",
+    )
+
     # Notification settings
     TELEGRAM_BOT_TOKEN: str = Field(
         default="",

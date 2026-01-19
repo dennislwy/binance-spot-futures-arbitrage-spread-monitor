@@ -3,7 +3,7 @@
 This module implements a real-time monitoring system for detecting spot-futures
 arbitrage opportunities on Binance. It subscribes to WebSocket streams for spot
 trades, futures aggregate trades, and funding rate updates to calculate spreads
-and generate entry signals.
+and generate entry/exit signals.
 
 Core Strategy:
     - Long Spot BTC + Short BTCUSDT Perpetual Futures
@@ -11,6 +11,13 @@ Core Strategy:
         - Positive spread (futures > spot)
         - Spread exceeds minimum threshold + safety margin
         - Positive funding rate
+    - Exit signal requires:
+        - Spread <= EXIT_MAX_SPREAD threshold
+
+State Machine:
+    - NOT IN POSITION: Monitors for entry conditions
+    - IN POSITION: Monitors for exit conditions (spread <= exit threshold)
+    - Transitions automatically on entry/exit signal
 
 Example:
     Run the monitor for configured symbols:
@@ -27,7 +34,8 @@ Example:
             symbols=["BTCUSDT", "ETHUSDT"],
             min_spread=0.0024,
             safety_margin=0.0004,
-            notifier=notifier
+            exit_max_spread=0.0,
+            notifier=notifier,
         )
 
 Attributes:
@@ -57,6 +65,7 @@ async def monitor_symbol(
     min_spread: float = 0.0024,
     safety_margin: float = 0.0004,
     min_funding_rate: float = 0.0,
+    exit_max_spread: float = 0.0,
 ) -> None:
     """Monitor a single trading pair for arbitrage opportunities.
 
@@ -75,6 +84,8 @@ async def monitor_symbol(
             Default is 0.04% (0.0004).
         min_funding_rate: Minimum funding rate threshold. Entry signal
             requires funding rate > this value. Default is 0.0.
+        exit_max_spread: Maximum spread threshold to trigger exit signal.
+            Exit signal fires when spread <= this value. Default is 0.0 (0%).
 
     Returns:
         None. This function runs indefinitely until interrupted.
@@ -91,6 +102,9 @@ async def monitor_symbol(
     # This ensures we have enough profit margin after accounting for fees
     entry_threshold = Decimal(str(min_spread + safety_margin))
 
+    # Exit threshold - when spread falls to this level, signal to close position
+    exit_threshold = Decimal(str(exit_max_spread))
+
     # Asyncio lock for thread-safe state access across concurrent handlers
     # Prevents race conditions when multiple streams update state simultaneously
     state_lock = asyncio.Lock()
@@ -104,16 +118,16 @@ async def monitor_symbol(
         "futures_price": None,  # Latest futures price from aggTrade stream
         "futures_time": None,  # Timestamp of latest futures price update
         "funding_rate": None,  # Current funding rate from mark price stream
-
         # Previous prices for change detection (avoid redundant calculations)
         "last_spot_price": None,  # Previous spot price for comparison
         "last_futures_price": None,  # Previous futures price for comparison
-
         # Signal tracking state to prevent duplicate notifications
         "last_signal": None,  # Previous signal tuple (status, reason)
         "last_spread": None,  # Previous calculated spread value
         "last_funding": None,  # Previous funding rate (4 decimal precision)
         "last_all_conditions_met": False,  # Previous combined condition state
+        # Position tracking for exit signal monitoring
+        "in_position": False,  # Whether currently in an arbitrage position
     }
 
     async def handle_spot_trade(msg: dict) -> None:
@@ -278,9 +292,10 @@ async def monitor_symbol(
             '2023-01-01 00:03:02.136'
         """
         # Convert ms to seconds for strftime, then append milliseconds
-        return time.strftime(
-            "%Y-%m-%d %H:%M:%S", time.localtime(epoch_ms / 1000)
-        ) + f".{epoch_ms % 1000:03d}"
+        return (
+            time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(epoch_ms / 1000))
+            + f".{epoch_ms % 1000:03d}"
+        )
 
     def calculate_spread(spot_price: Decimal, futures_price: Decimal) -> Decimal | None:
         """Calculate the percentage spread between spot and futures prices.
@@ -308,16 +323,22 @@ async def monitor_symbol(
 
     @ThrottledDebouncer(debounce_ms=100, max_wait_ms=500)
     async def evaluate_signal() -> None:
-        """Evaluate entry conditions and generate trading signals.
+        """Evaluate entry and exit conditions and generate trading signals.
 
         This function is decorated with ThrottledDebouncer to prevent
-        excessive evaluations during high-frequency updates. It checks
-        three conditions for entry:
+        excessive evaluations during high-frequency updates.
+
+        Entry conditions (when not in position):
         1. Positive spread (futures > spot)
         2. Spread exceeds entry threshold
         3. Funding rate is positive
 
-        When all conditions are met or change state, a notification is sent.
+        Exit condition (when in position):
+        - Spread <= exit_max_spread threshold
+
+        State transitions:
+        - Not in position + entry conditions met -> Enter position, send ENTER signal
+        - In position + exit condition met -> Exit position, send EXIT signal
 
         Args:
             None. Reads from shared state dictionary.
@@ -344,78 +365,110 @@ async def monitor_symbol(
                 last_all_conditions_met = state["last_all_conditions_met"]
                 last_spot_price = state["last_spot_price"]
                 last_futures_price = state["last_futures_price"]
+                in_position = state["in_position"]
 
                 # Skip evaluation if data is incomplete or unchanged
                 # This prevents redundant calculations and notifications
-                if ((spot == last_spot_price and futures == last_futures_price)
+                if (
+                    (spot == last_spot_price and futures == last_futures_price)
                     or spot is None
                     or futures is None
-                    or funding is None):
+                    or funding is None
+                ):
                     return
 
                 # Calculate current spread percentage
                 spread = calculate_spread(spot, futures)
 
-                # Evaluate each entry condition independently
-                conditions = {
-                    "positive_spread": futures > spot,  # Contango required
-                    "spread_threshold": spread >= entry_threshold,  # Min profit margin
-                    "funding_positive": funding > min_funding_rate,  # Positive carry
-                }
+                # Initialize notification variables
+                should_notify = False
+                notification_msg = None
+                signal_status = None
+                reason_text = ""
 
-                # Determine overall signal (all conditions must be true)
-                all_conditions_met = all(conditions.values())
-                signal_status = "ENTER ✅" if all_conditions_met else "WAIT ❌"
+                if in_position:
+                    # === EXIT SIGNAL EVALUATION ===
+                    # Check if spread has fallen to exit threshold
+                    exit_condition_met = spread <= exit_threshold
 
-                # Build human-readable reason for WAIT signals
-                reasons = []
-                if not conditions["positive_spread"]:
-                    reasons.append("Negative spread")
-                if not conditions["spread_threshold"] and conditions["positive_spread"]:
-                    reasons.append("Spread too small")
-                if not conditions["funding_positive"]:
-                    reasons.append("Negative funding")
+                    if exit_condition_met:
+                        signal_status = "EXIT ⬆️"
+                        should_notify = True
+                        state["in_position"] = False
+                        state["last_all_conditions_met"] = False
 
-                reason_text = f" ({', '.join(reasons)})" if reasons else ""
+                else:
+                    # === ENTRY SIGNAL EVALUATION ===
+                    # Evaluate each entry condition independently
+                    conditions = {
+                        "positive_spread": futures > spot,  # Contango required
+                        "spread_threshold": spread >= entry_threshold,  # Min profit margin
+                        "funding_positive": funding > min_funding_rate,  # Positive carry
+                    }
 
-                # Create signal snapshot for comparison
-                current_signal = (signal_status, reason_text)
+                    # Determine overall signal (all conditions must be true)
+                    all_conditions_met = all(conditions.values())
 
-                # Determine if notification should be sent
-                # Notify on: entry signal, or any state transition
-                should_notify = all_conditions_met != last_all_conditions_met
-                
+                    # Build human-readable reason for WAIT signals
+                    reasons = []
+                    if not conditions["positive_spread"]:
+                        reasons.append("Negative spread")
+                    if not conditions["spread_threshold"] and conditions["positive_spread"]:
+                        reasons.append("Spread too small")
+                    if not conditions["funding_positive"]:
+                        reasons.append("Negative funding")
+
+                    reason_text = f" ({', '.join(reasons)})" if reasons else ""
+
+                    # Determine if notification should be sent
+                    # Notify on: entry signal, or any state transition
+                    should_notify = all_conditions_met != last_all_conditions_met
+
+                    if all_conditions_met:
+                        signal_status = "ENTER ⬇️"
+                        # Transition to in_position state
+                        state["in_position"] = True
+                    else:
+                        signal_status = "WAIT ❌"
+
+                    state["last_all_conditions_met"] = all_conditions_met
+
                 # Log on: zero seconds on every hour
                 localtime = time.localtime()
-                should_log = symbol == "BTCUSDT" and localtime.tm_min == 0 and localtime.tm_sec == 0
+                should_log = localtime.tm_min == 0 and localtime.tm_sec == 0
 
                 # Update state atomically before releasing lock
                 state["last_spot_price"] = spot
                 state["last_futures_price"] = futures
                 state["last_funding"] = funding
                 state["last_spread"] = spread
-                state["last_signal"] = current_signal
-                state["last_all_conditions_met"] = all_conditions_met
+                state["last_signal"] = (signal_status, reason_text)
 
                 # Prepare log message if logging is scheduled
                 if should_log:
-                    log_msg = (f"{symbol} | "
+                    position_status = "IN_POSITION" if state["in_position"] else "NO_POSITION"
+                    log_msg = (
+                        f"{symbol} | "
                         f"{to_humanize_time(max(spot_time, futures_time))} | "
                         f"Spot: {spot} | Futures: {futures} | "
-                        f"Spread: {spread*100:.5f}% | Funding: {funding*100:.5f}%")
+                        f"Spread: {spread * 100:.5f}% | Funding: {funding * 100:.5f}% | "
+                        f"Status: {position_status}"
+                    )
 
                 # Prepare notification message while still holding state snapshot
                 if should_notify and notifier:
-                    notification_msg = (f"{symbol} | "
+                    notification_msg = (
+                        f"{symbol} | "
                         f"{to_humanize_time(max(spot_time, futures_time))} | "
                         f"Spot: {spot} | Futures: {futures} | "
-                        f"Spread: {spread*100:.5f}% | Funding: {funding*100:.5f}% | "
-                        f"{signal_status}{reason_text}")
-                    
+                        f"Spread: {spread * 100:.5f}% | Funding: {funding * 100:.5f}% | "
+                        f"{signal_status}{reason_text}"
+                    )
+
             # Perform I/O outside of lock to minimize lock contention
             if should_log:
                 logger.info(log_msg)
-            
+
             if should_notify and notifier:
                 logger.info(notification_msg)
                 await notifier.text(notification_msg)
@@ -424,10 +477,7 @@ async def monitor_symbol(
             logger.error(f"[{symbol}] Error in evaluate_signal: {e}", exc_info=True)
 
     async def process_stream(
-        stream: ReconnectingWebsocket,
-        handler: callable,
-        symbol: str,
-        stream_name: str
+        stream: ReconnectingWebsocket, handler: callable, symbol: str, stream_name: str
     ) -> None:
         """Process WebSocket stream messages in a continuous loop.
 
@@ -482,7 +532,11 @@ async def monitor_symbol(
             funding_stream = bsm.symbol_mark_price_socket(symbol, fast=False)
 
             # Enter async context managers for all three streams
-            async with spot_stream as spot_ws, futures_stream as futures_ws, funding_stream as funding_ws:
+            async with (
+                spot_stream as spot_ws,
+                futures_stream as futures_ws,
+                funding_stream as funding_ws,
+            ):
                 logger.info(
                     f"[{symbol}] WebSocket streams connected (attempt {retry_count + 1}). Monitoring for arbitrage signals..."
                 )
@@ -500,10 +554,14 @@ async def monitor_symbol(
                     process_stream(spot_ws, handle_spot_trade, symbol, "Spot Aggregated Trade")
                 )
                 futures_task = asyncio.create_task(
-                    process_stream(futures_ws, handle_futures_aggtrade, symbol, "Futures Aggregated Trade")
+                    process_stream(
+                        futures_ws, handle_futures_aggtrade, symbol, "Futures Aggregated Trade"
+                    )
                 )
                 funding_task = asyncio.create_task(
-                    process_stream(funding_ws, handle_futures_mark_price, symbol, "Futures Mark Price")
+                    process_stream(
+                        funding_ws, handle_futures_mark_price, symbol, "Futures Mark Price"
+                    )
                 )
 
                 # Wait for all tasks (any exception will propagate)
@@ -543,7 +601,8 @@ async def main(
     min_spread: float = 0.0024,
     safety_margin: float = 0.0004,
     min_funding_rate: float = 0.0,
-    notifier: Telegram | None = None
+    exit_max_spread: float = 0.0,
+    notifier: Telegram | None = None,
 ) -> None:
     """Main entry point for the arbitrage spread monitor.
 
@@ -559,6 +618,8 @@ async def main(
             Default is 0.04% (0.0004). Accounts for execution slippage.
         min_funding_rate: Funding rate threshold for entry signal.
             Default is 0.0 (must be positive). Higher values = more selective.
+        exit_max_spread: Maximum spread threshold to trigger exit signal.
+            Default is 0.0 (0%). Exit signal fires when spread <= this value.
         notifier: Optional Telegram notifier for alerts.
             If None, signals are logged but not sent externally.
 
@@ -574,7 +635,8 @@ async def main(
             symbols=["BTCUSDT"],
             min_spread=0.003,  # 0.3%
             safety_margin=0.0005,  # 0.05%
-            min_funding_rate=0.0001  # 0.01%
+            min_funding_rate=0.0001,  # 0.01%
+            exit_max_spread=0.0  # 0%
         )
     """
     # Calculate combined entry threshold for logging
@@ -592,7 +654,8 @@ async def main(
 
     # Log configuration parameters for debugging
     logging.info(
-        f"Configuration: MIN_SPREAD={min_spread*100}%, SAFETY_MARGIN={safety_margin*100}%, ENTRY_THRESHOLD={entry_threshold*100}%"
+        f"Configuration: MIN_SPREAD={min_spread * 100}%, SAFETY_MARGIN={safety_margin * 100}%, "
+        f"ENTRY_THRESHOLD={entry_threshold * 100}%, EXIT_MAX_SPREAD={exit_max_spread * 100}%"
     )
 
     # Initialize Binance async client (no API keys needed for public data)
@@ -617,6 +680,7 @@ async def main(
                     min_spread=min_spread,
                     safety_margin=safety_margin,
                     min_funding_rate=min_funding_rate,
+                    exit_max_spread=exit_max_spread,
                 )
             )
             for symbol in symbols
@@ -693,6 +757,9 @@ if __name__ == "__main__":
     min_spread = settings.MIN_SPREAD
     safety_margin = settings.SAFETY_MARGIN
     min_funding_rate = settings.MIN_FUNDING_RATE
+    exit_max_spread = settings.EXIT_MAX_SPREAD
 
     # Start the async event loop with main coroutine
-    asyncio.run(main(symbols, min_spread, safety_margin, min_funding_rate, notifier))
+    asyncio.run(
+        main(symbols, min_spread, safety_margin, min_funding_rate, exit_max_spread, notifier)
+    )
