@@ -20,8 +20,8 @@ WorkingDirectory=$APP_DIR
 ExecStart=$HOME/.local/bin/uv run python main.py
 Restart=on-failure
 RestartSec=10
-StandardOutput=journal
-StandardError=journal
+StandardOutput=append:$APP_DIR/log/systemd.log
+StandardError=append:$APP_DIR/log/systemd-error.log
 
 [Install]
 WantedBy=multi-user.target

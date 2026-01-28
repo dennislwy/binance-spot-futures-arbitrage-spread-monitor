@@ -47,6 +47,7 @@ import logging
 import time
 from decimal import Decimal
 
+import aiohttp
 from binance import AsyncClient, BinanceSocketManager, ReconnectingWebsocket
 
 from core.config import settings
@@ -520,15 +521,23 @@ async def monitor_symbol(
                     await handler(msg)
                 except Exception as e:
                     logger.error(f"[{symbol}] Error in {stream_name} handler: {e}")
+        except asyncio.CancelledError:
+            # Task was cancelled (normal during reconnection)
+            logger.info(f"[{symbol}] {stream_name} stream task cancelled")
+            raise
         except Exception as e:
             # Log stream-level errors and propagate for reconnection
-            logger.error(f"[{symbol}] {stream_name} stream error: {e}", exc_info=True)
+            logger.error(
+                f"[{symbol}] {stream_name} stream disconnected: {type(e).__name__}: {e}",
+                exc_info=True
+            )
             raise
 
     # WebSocket reconnection configuration
     max_retries: int | None = None  # None = retry indefinitely
     retry_count = 0  # Track consecutive failed attempts
     retry_delay = 3  # Initial delay between reconnection attempts (seconds)
+    max_retry_delay = 30  # Maximum delay between retries (seconds)
 
     # Main reconnection loop - runs until max_retries or KeyboardInterrupt
     while max_retries is None or retry_count < max_retries:
@@ -555,7 +564,10 @@ async def monitor_symbol(
 
                 # Notify on successful reconnection after failures
                 if retry_count > 0 and notifier:
-                    await notifier.text(f"WebSocket reconnected after {retry_count} attempts")
+                    try:
+                        await notifier.text(f"[{symbol}] WebSocket reconnected successfully after {retry_count} attempts")
+                    except Exception as notif_error:
+                        logger.warning(f"[{symbol}] Failed to send reconnection notification: {notif_error}")
 
                 # Reset retry state on successful connection
                 retry_count = 0
@@ -577,33 +589,91 @@ async def monitor_symbol(
                 )
 
                 # Wait for all tasks (any exception will propagate)
+                # Use return_exceptions=False so exceptions bubble up immediately
                 await asyncio.gather(spot_task, futures_task, funding_task)
 
         except KeyboardInterrupt:
             # Graceful shutdown on Ctrl+C
             logger.info(f"[{symbol}] Shutting down gracefully...")
+
+            # Cancel all tasks explicitly
+            for task in [spot_task, futures_task, funding_task]:
+                if not task.done():
+                    task.cancel()
+
+            # Wait for tasks to complete cancellation
+            await asyncio.gather(spot_task, futures_task, funding_task, return_exceptions=True)
             break
 
         except Exception as e:
+            # Cancel all running tasks explicitly when one fails
+            # This ensures clean shutdown of all streams before reconnection
+            for task in [spot_task, futures_task, funding_task]:
+                if not task.done():
+                    task.cancel()
+
+            # Wait for all tasks to complete cancellation
+            await asyncio.gather(spot_task, futures_task, funding_task, return_exceptions=True)
+
             # Increment retry counter and log error
             retry_count += 1
             logger.error(
-                f"[{symbol}] Error in main loop (attempt {retry_count}): {e}",
+                f"[{symbol}] WebSocket connection lost (attempt {retry_count}): {e}",
                 exc_info=True,
             )
 
-            # Notify about reconnection attempt
+            # Notify about reconnection attempt (with error handling)
             if notifier:
-                await notifier.text(
-                    f"[{symbol}] WebSocket error detected. Reconnecting in {retry_delay}s... (attempt {retry_count})"
+                try:
+                    await notifier.text(
+                        f"[{symbol}] WebSocket error detected. Checking network... (attempt {retry_count})"
+                    )
+                except Exception as notif_error:
+                    logger.warning(f"[{symbol}] Failed to send notification: {notif_error}")
+
+            # Check network connectivity before attempting reconnection
+            logger.info(f"[{symbol}] Checking network connectivity before reconnection...")
+            network_available = await check_network_connectivity(timeout=5, max_attempts=3)
+
+            if not network_available:
+                # Network is down, wait longer before retrying
+                network_retry_delay = 10
+                logger.warning(
+                    f"[{symbol}] Network unavailable. Waiting {network_retry_delay}s before retrying connectivity check..."
                 )
 
-            # Wait before retry attempt
-            logger.info(f"[{symbol}] Reconnecting in {retry_delay} seconds...")
+                if notifier:
+                    try:
+                        await notifier.text(
+                            f"[{symbol}] Network unavailable. Waiting for connectivity to restore..."
+                        )
+                    except Exception as notif_error:
+                        logger.warning(f"[{symbol}] Failed to send notification: {notif_error}")
+
+                await asyncio.sleep(network_retry_delay)
+
+                # Retry connectivity check in a loop until network is back
+                while not await check_network_connectivity(timeout=5, max_attempts=3):
+                    logger.warning(
+                        f"[{symbol}] Still no network. Retrying in {network_retry_delay}s..."
+                    )
+                    await asyncio.sleep(network_retry_delay)
+                    # Increase wait time up to 30 seconds
+                    network_retry_delay = min(network_retry_delay + 5, 30)
+
+                logger.info(f"[{symbol}] Network connectivity restored!")
+                if notifier:
+                    try:
+                        await notifier.text(f"[{symbol}] Network connectivity restored. Reconnecting WebSocket...")
+                    except Exception as notif_error:
+                        logger.warning(f"[{symbol}] Failed to send notification: {notif_error}")
+
+            # Wait before retry attempt (shorter since network is confirmed available)
+            logger.info(f"[{symbol}] Network OK. Reconnecting WebSocket in {retry_delay:.1f} seconds...")
             await asyncio.sleep(retry_delay)
 
-            # Exponential backoff: increase delay up to 30 seconds max
-            retry_delay = min(retry_delay * 1.5, 30.0)
+            # Exponential backoff: increase delay up to max_retry_delay
+            retry_delay = min(retry_delay * 1.5, max_retry_delay)
 
     logger.info(f"[{symbol}] Monitor terminated")
 
@@ -743,6 +813,87 @@ def calculate_queue_size(symbols: list[str], buffer_seconds: int = 10) -> int:
 
     # Round up to nearest 500 for clean configuration
     return ((queue_size + 499) // 500) * 500
+
+
+async def check_network_connectivity(timeout: int = 5, max_attempts: int = 3) -> bool:
+    """Verify internet connectivity to Binance API before reconnection.
+
+    Performs multiple ping attempts to Binance API to ensure network
+    is stable before attempting WebSocket reconnection. This prevents
+    wasted reconnection attempts during network outages.
+
+    Args:
+        timeout: Timeout in seconds for each connectivity check.
+            Default is 5 seconds.
+        max_attempts: Maximum number of ping attempts before declaring
+            network available. Default is 3 attempts.
+
+    Returns:
+        bool: True if network connectivity is confirmed, False otherwise.
+
+    Example:
+        >>> await check_network_connectivity()
+        True  # Network is available
+
+        >>> await check_network_connectivity(timeout=3, max_attempts=5)
+        False  # Network is down after 5 attempts
+
+    Note:
+        Tests connectivity to both REST API and WebSocket endpoints
+        to ensure both are reachable before reconnection.
+    """
+    # Endpoints to test connectivity
+    endpoints = [
+        "https://api.binance.com/api/v3/ping",  # REST API health check
+        "https://fapi.binance.com/fapi/v1/ping",  # Futures REST API health check
+    ]
+
+    for attempt in range(1, max_attempts + 1):
+        try:
+            # Test connectivity with timeout
+            async with aiohttp.ClientSession() as session:
+                # Try both endpoints in parallel
+                tasks = [
+                    session.get(endpoint, timeout=aiohttp.ClientTimeout(total=timeout))
+                    for endpoint in endpoints
+                ]
+
+                # Wait for all endpoints to respond
+                responses = await asyncio.gather(*tasks, return_exceptions=True)
+
+                # Check if all endpoints are reachable
+                all_ok = all(
+                    isinstance(resp, aiohttp.ClientResponse) and resp.status == 200
+                    for resp in responses
+                )
+
+                if all_ok:
+                    logger.info(
+                        f"Network connectivity confirmed (attempt {attempt}/{max_attempts})"
+                    )
+                    return True
+                else:
+                    logger.warning(
+                        f"Network connectivity check failed (attempt {attempt}/{max_attempts}): "
+                        f"One or more endpoints unreachable"
+                    )
+
+        except asyncio.TimeoutError:
+            logger.warning(
+                f"Network connectivity check timed out (attempt {attempt}/{max_attempts})"
+            )
+        except Exception as e:
+            logger.warning(
+                f"Network connectivity check error (attempt {attempt}/{max_attempts}): {e}"
+            )
+
+        # Wait before next attempt (if not last attempt)
+        if attempt < max_attempts:
+            await asyncio.sleep(2)
+
+    # All attempts failed
+    logger.error(f"Network connectivity unavailable after {max_attempts} attempts")
+    return False
 
 
 # Script entry point
