@@ -165,6 +165,10 @@ async def monitor_symbol(
 
             # Update state atomically to prevent partial updates
             async with state_lock:
+                # Ignore error messages that contain 'e' field indicating an error
+                if 'e' in data:
+                    return
+                
                 # Extract and convert price to Decimal for precise arithmetic
                 state["spot_price"] = Decimal(data["p"])
                 # Store event timestamp for time-based analysis
@@ -217,6 +221,10 @@ async def monitor_symbol(
 
             # Update state atomically within lock
             async with state_lock:
+                # Ignore error messages that contain 'e' field indicating an error
+                if 'e' in data:
+                    return
+                
                 # Store futures price as Decimal for precise spread calculation
                 state["futures_price"] = Decimal(data["p"])
                 state["futures_time"] = int(data["E"])
@@ -268,6 +276,10 @@ async def monitor_symbol(
             # Update only funding rate from mark price stream
             # Mark price itself is not used; aggTrade provides real-time price
             async with state_lock:
+                # Ignore error messages that contain 'e' field indicating an error
+                if 'e' in data:
+                    return
+                
                 state["funding_rate"] = Decimal(data["r"])
 
         except KeyError as e:
